@@ -1,0 +1,269 @@
+"""Tests for ``packages.sca.osv``.
+
+Uses an in-process fake HttpClient so tests don't touch the network and
+run on every commit. The fake records every call so assertions can
+verify caching prevented re-fetches.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List
+
+import pytest
+
+from core.json import JsonCache
+from core.http import HttpError
+from packages.sca.models import Confidence, Dependency, PinStyle
+from packages.sca.osv import (
+    OSV_QUERY_BATCH_URL,
+    OSV_VULN_URL_TEMPLATE,
+    OsvClient,
+    parse_osv_record,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fake HTTP client
+# ---------------------------------------------------------------------------
+
+class FakeHttp:
+    def __init__(
+        self,
+        batch_results: List[List[str]] | None = None,
+        vuln_records: Dict[str, Dict[str, Any]] | None = None,
+        post_error: Exception | None = None,
+        get_error: Exception | None = None,
+    ) -> None:
+        self.batch_results = batch_results or []
+        self.vuln_records = vuln_records or {}
+        self.post_error = post_error
+        self.get_error = get_error
+        self.posts: List[tuple[str, dict]] = []
+        self.gets: List[str] = []
+
+    def post_json(self, url: str, body: dict, timeout: int = 30) -> dict:
+        self.posts.append((url, body))
+        if self.post_error:
+            raise self.post_error
+        return {
+            "results": [
+                {"vulns": [{"id": vid} for vid in slot]}
+                for slot in self.batch_results
+            ],
+        }
+
+    def get_json(self, url: str, timeout: int = 30) -> dict:
+        self.gets.append(url)
+        if self.get_error:
+            raise self.get_error
+        # Resolve which vuln id was requested.
+        for vid, record in self.vuln_records.items():
+            if url == OSV_VULN_URL_TEMPLATE.format(vid):
+                return record
+        raise HttpError(f"unknown URL in fake: {url}", status=404)
+
+    def get_bytes(self, url: str, timeout: int = 30, max_bytes: int = 0) -> bytes:
+        raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def _dep(name: str, version: str | None = "1.0.0", ecosystem: str = "npm") -> Dependency:
+    return Dependency(
+        ecosystem=ecosystem,
+        name=name,
+        version=version,
+        declared_in=Path("/tmp/x"),
+        scope="main",
+        is_lockfile=False,
+        pin_style=PinStyle.EXACT,
+        direct=True,
+        purl=f"pkg:npm/{name}@{version}",
+        parser_confidence=Confidence("high", reason="t"),
+    )
+
+
+_LOG4J_RECORD = {
+    "id": "GHSA-jfh8-c2jp-5v3q",
+    "modified": "2024-01-01T00:00:00Z",
+    "published": "2021-12-10T00:00:00Z",
+    "aliases": ["CVE-2021-44228"],
+    "summary": "Log4Shell",
+    "details": "Remote code execution.",
+    "affected": [
+        {
+            "package": {"ecosystem": "Maven",
+                        "name": "org.apache.logging.log4j:log4j-core"},
+            "ranges": [
+                {"type": "ECOSYSTEM",
+                 "events": [{"introduced": "2.0-beta9"}, {"fixed": "2.15.0"}]},
+            ],
+        },
+    ],
+    "severity": [
+        {"type": "CVSS_V3",
+         "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"},
+    ],
+    "references": [{"type": "WEB", "url": "https://example.com"}],
+}
+
+
+# ---------------------------------------------------------------------------
+# parse_osv_record
+# ---------------------------------------------------------------------------
+
+def test_parse_osv_record_extracts_core_fields() -> None:
+    a = parse_osv_record(_LOG4J_RECORD)
+    assert a.osv_id == "GHSA-jfh8-c2jp-5v3q"
+    assert "CVE-2021-44228" in a.aliases
+    assert a.summary == "Log4Shell"
+    assert a.fixed_versions == ["2.15.0"]
+    assert a.severity is not None
+    assert a.severity.severity == "critical"
+    assert a.severity.score >= 9.0
+    assert a.references == ["https://example.com"]
+    assert a.published is not None
+    assert len(a.affected) == 1
+    assert a.affected[0].type == "ECOSYSTEM"
+
+
+def test_parse_osv_record_missing_id_raises() -> None:
+    with pytest.raises(ValueError):
+        parse_osv_record({"summary": "x"})
+
+
+def test_parse_osv_record_unknown_severity_type_skipped() -> None:
+    record = dict(_LOG4J_RECORD)
+    record["severity"] = [{"type": "CVSS_V2", "score": "AV:N/AC:L"}]
+    a = parse_osv_record(record)
+    assert a.severity is None
+
+
+def test_parse_osv_record_invalid_dates_become_none() -> None:
+    record = dict(_LOG4J_RECORD)
+    record["modified"] = "not-a-date"
+    record["published"] = ""
+    a = parse_osv_record(record)
+    assert a.modified is None
+    assert a.published is None
+
+
+# ---------------------------------------------------------------------------
+# OsvClient — happy path
+# ---------------------------------------------------------------------------
+
+def test_query_batch_happy_path(tmp_path: Path) -> None:
+    deps = [_dep("lodash"), _dep("safe", version="2.0.0")]
+    http = FakeHttp(
+        batch_results=[["GHSA-jfh8-c2jp-5v3q"], []],
+        vuln_records={"GHSA-jfh8-c2jp-5v3q": _LOG4J_RECORD},
+    )
+    client = OsvClient(http, JsonCache(root=tmp_path))
+
+    results = client.query_batch(deps)
+
+    assert len(results) == 2
+    by_key = {r.dep_key: r for r in results}
+    assert by_key["npm:lodash@1.0.0"].advisories[0].osv_id == "GHSA-jfh8-c2jp-5v3q"
+    assert by_key["npm:safe@2.0.0"].advisories == []
+    assert len(http.posts) == 1
+
+
+def test_query_batch_skips_unversioned_deps(tmp_path: Path) -> None:
+    deps = [_dep("noversion", version=None), _dep("lodash")]
+    http = FakeHttp(
+        batch_results=[[]],     # only the versioned dep is queried
+        vuln_records={},
+    )
+    client = OsvClient(http, JsonCache(root=tmp_path))
+    results = client.query_batch(deps)
+
+    assert len(results) == 1
+    assert results[0].dep_key == "npm:lodash@1.0.0"
+    assert http.posts and len(http.posts[0][1]["queries"]) == 1
+
+
+def test_query_batch_dedups_repeated_deps(tmp_path: Path) -> None:
+    deps = [_dep("lodash"), _dep("lodash"), _dep("lodash")]
+    http = FakeHttp(batch_results=[[]], vuln_records={})
+    client = OsvClient(http, JsonCache(root=tmp_path))
+    client.query_batch(deps)
+    # Only one query was sent — the repeated key is collapsed.
+    assert len(http.posts[0][1]["queries"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# OsvClient — caching
+# ---------------------------------------------------------------------------
+
+def test_warm_cache_skips_remote(tmp_path: Path) -> None:
+    deps = [_dep("lodash")]
+    http = FakeHttp(
+        batch_results=[["GHSA-jfh8-c2jp-5v3q"]],
+        vuln_records={"GHSA-jfh8-c2jp-5v3q": _LOG4J_RECORD},
+    )
+    cache = JsonCache(root=tmp_path)
+    client = OsvClient(http, cache)
+    client.query_batch(deps)
+
+    # Second run with same deps + same cache: zero new HTTP calls.
+    http2 = FakeHttp()
+    client2 = OsvClient(http2, cache)
+    results = client2.query_batch(deps)
+    assert results[0].advisories[0].osv_id == "GHSA-jfh8-c2jp-5v3q"
+    assert http2.posts == []
+    assert http2.gets == []
+
+
+def test_offline_with_cold_cache_returns_empty(tmp_path: Path) -> None:
+    deps = [_dep("lodash")]
+    http = FakeHttp()
+    client = OsvClient(http, JsonCache(root=tmp_path), offline=True)
+    results = client.query_batch(deps)
+    assert results[0].advisories == []
+    # Offline mode never calls the network.
+    assert http.posts == []
+    assert http.gets == []
+
+
+# ---------------------------------------------------------------------------
+# OsvClient — failure modes
+# ---------------------------------------------------------------------------
+
+def test_querybatch_http_error_yields_empty(tmp_path: Path) -> None:
+    deps = [_dep("lodash")]
+    http = FakeHttp(post_error=HttpError("boom"))
+    client = OsvClient(http, JsonCache(root=tmp_path))
+    results = client.query_batch(deps)
+    assert results[0].advisories == []
+
+
+def test_vuln_hydration_error_drops_only_that_id(tmp_path: Path) -> None:
+    deps = [_dep("lodash"), _dep("other")]
+    http = FakeHttp(
+        batch_results=[["GHSA-bad"], ["GHSA-jfh8-c2jp-5v3q"]],
+        vuln_records={"GHSA-jfh8-c2jp-5v3q": _LOG4J_RECORD},
+        # GHSA-bad will trigger a 404 in get_json.
+    )
+    client = OsvClient(http, JsonCache(root=tmp_path))
+    results = client.query_batch(deps)
+    by_key = {r.dep_key: r for r in results}
+    assert by_key["npm:lodash@1.0.0"].advisories == []
+    assert by_key["npm:other@1.0.0"].advisories[0].osv_id == "GHSA-jfh8-c2jp-5v3q"
+
+
+def test_malformed_querybatch_response_treated_as_no_vuln(tmp_path: Path) -> None:
+    deps = [_dep("lodash"), _dep("other")]
+
+    class WrongShapeHttp(FakeHttp):
+        def post_json(self, url: str, body: dict, timeout: int = 30) -> dict:
+            self.posts.append((url, body))
+            return {"results": "not a list"}
+
+    http = WrongShapeHttp()
+    client = OsvClient(http, JsonCache(root=tmp_path))
+    results = client.query_batch(deps)
+    assert all(r.advisories == [] for r in results)

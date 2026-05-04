@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Run /sca with run-lifecycle integration.
+
+Usage:
+  raptor-sca [<target>] [analyse-flags...]      # default: analyse
+  raptor-sca review <eco> <name> <version> ...
+  raptor-sca whatif <eco> <name> <from> <to>|--candidate ...
+  raptor-sca update --findings <path> | --target <path> ...
+
+Only the analyse path interacts with the run-lifecycle helpers (the
+findings.json + report.md produced are first-class run artefacts that
+the rest of RAPTOR consumes). The sub-commands run as-is and write
+their outputs to whatever ``--out`` the operator supplies.
+
+Target resolution for analyse (per CLAUDE.md DEFAULT TARGET DIRECTORY):
+  1. Explicit positional argument
+  2. Active project's target (resolved by ``get_output_dir``)
+  3. $RAPTOR_CALLER_DIR (launcher saves the user's cwd before chdir)
+  4. fail with exit code 2
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
+
+from core.run.metadata import complete_run, fail_run, start_run     # noqa: E402
+from core.run.output import get_output_dir                           # noqa: E402
+from packages.sca import cli as sca_cli                              # noqa: E402
+from packages.sca.cli import _configure_logging, _print_summary      # noqa: E402
+from packages.sca.pipeline import RunOptions, run_sca                # noqa: E402
+
+_SUBCOMMANDS = ("review", "whatif", "update", "harden",
+                "diff", "verify", "render", "purl", "health")
+
+
+def main(argv=None):
+    raw = list(sys.argv[1:] if argv is None else argv)
+
+    # Sub-commands bypass lifecycle: their artefacts aren't run-shaped
+    # (e.g., a single-line review verdict, a markdown delta report).
+    if raw and raw[0] in _SUBCOMMANDS:
+        return sca_cli.main(raw)
+
+    return _run_analyse(raw)
+
+
+# ---------------------------------------------------------------------------
+# Analyse-with-lifecycle path
+# ---------------------------------------------------------------------------
+
+def _parse_analyse(argv):
+    p = argparse.ArgumentParser(prog="raptor-sca")
+    p.add_argument("target", nargs="?",
+                   help="path to project (default: active project / "
+                        "$RAPTOR_CALLER_DIR)")
+    p.add_argument("--out", help="explicit output directory")
+    p.add_argument("--offline", action="store_true")
+    p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--no-kev", action="store_true")
+    p.add_argument("--no-epss", action="store_true")
+    p.add_argument("--no-reachability", action="store_true")
+    p.add_argument("--no-supply-chain", action="store_true")
+    p.add_argument("--include-commented", action="store_true",
+                   help="parse commented-out version-pinned lines as deps; "
+                        "matching CVEs surface at info severity")
+    p.add_argument("--no-inline-installs", action="store_true",
+                   help="skip Dockerfile / devcontainer.json / shell / GHA "
+                        "extraction of pip / apt / yum / dnf / apk installs")
+    p.add_argument("--use-offline-db", action="store_true",
+                   help="route OSV lookups through a local sqlite-backed "
+                        "copy of the OSV daily-dump zips")
+    p.add_argument("--offline-db-path",
+                   help="override the default offline-DB sqlite location")
+    p.add_argument("--baseline", metavar="PATH",
+                   help="emit baseline-delta against a previous findings.json")
+    p.add_argument("--trust-repo", action="store_true",
+                   help="treat the target as trusted (passes through to "
+                        "future sandbox-gated operations)")
+    p.add_argument("--cache-root")
+    p.add_argument("-v", "--verbose", action="count", default=0)
+    return p.parse_args(argv)
+
+
+def _resolve_target(explicit):
+    if explicit:
+        return Path(explicit).resolve()
+    caller = os.environ.get("RAPTOR_CALLER_DIR")
+    if caller:
+        return Path(caller).resolve()
+    return None
+
+
+def _run_analyse(argv):
+    args = _parse_analyse(argv)
+    _configure_logging(args.verbose)
+
+    target = _resolve_target(args.target)
+    if target is None:
+        print(
+            "raptor-sca: no target specified and $RAPTOR_CALLER_DIR is unset; "
+            "either pass a path or set up an active project.",
+            file=sys.stderr,
+        )
+        return 2
+    if not target.exists() or not target.is_dir():
+        print(f"raptor-sca: target not a directory: {target}", file=sys.stderr)
+        return 2
+
+    try:
+        output_dir = get_output_dir(
+            command="sca",
+            target_name=target.name,
+            explicit_out=args.out,
+            target_path=str(target),
+        )
+    except Exception as e:                  # noqa: BLE001
+        print(f"raptor-sca: cannot resolve output dir: {e}", file=sys.stderr)
+        return 2
+
+    start_run(output_dir, "sca", target=str(target))
+
+    if args.trust_repo:
+        try:
+            from core.security.cc_trust import set_trust_override
+            set_trust_override(True)
+        except ImportError:
+            pass
+
+    options = RunOptions(
+        offline=args.offline,
+        no_cache=args.no_cache,
+        cache_root=Path(args.cache_root) if args.cache_root else None,
+        enable_kev=not args.no_kev,
+        enable_epss=not args.no_epss,
+        enable_reachability=not args.no_reachability,
+        enable_supply_chain=not args.no_supply_chain,
+        include_commented=args.include_commented,
+        enable_inline_installs=not args.no_inline_installs,
+        use_offline_db=args.use_offline_db,
+        offline_db_path=(Path(args.offline_db_path)
+                          if args.offline_db_path else None),
+    )
+
+    try:
+        result = run_sca(target=target, output_dir=output_dir, options=options)
+    except Exception as e:                  # noqa: BLE001
+        fail_run(output_dir, str(e))
+        print(f"raptor-sca: run failed: {e}", file=sys.stderr)
+        return 3
+
+    if args.baseline:
+        try:
+            sca_cli._emit_baseline_delta(
+                baseline_path=Path(args.baseline).resolve(),
+                current_findings=output_dir / "findings.json",
+                output_dir=output_dir,
+            )
+        except Exception as e:              # noqa: BLE001
+            print(f"raptor-sca: baseline delta failed: {e}",
+                   file=sys.stderr)
+
+    complete_run(output_dir)
+    _print_summary(result)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

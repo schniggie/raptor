@@ -521,14 +521,24 @@ python3 packages/recon/agent.py \
 
 **Purpose**: Software Composition Analysis (dependency vulnerabilities)
 
-**Main Entry Point**: `agent.py`
+**Main Entry Point**: `cli.py` (invoked via the `libexec/raptor-sca`
+shim or `python3 raptor.py sca`)
 
 **CLI Interface**:
 ```bash
-python3 packages/sca/agent.py \
-  --repo /path/to/code \
-  --out /path/to/output
+# Recommended — wraps the run-lifecycle helpers + project resolution.
+libexec/raptor-sca /path/to/code --out /path/to/output
+
+# Equivalent direct invocation:
+python3 -m packages.sca.cli /path/to/code --out /path/to/output
+
+# Or via the unified launcher:
+python3 raptor.py sca --repo /path/to/code --out /path/to/output
 ```
+
+Sub-commands (`review`, `whatif`, `update`) and the CI gate
+(`libexec/raptor-sca-gate`) are documented in
+`.claude/commands/raptor-sca.md`.
 
 **Responsibilities**:
 - Detect dependency files (requirements.txt, package.json, pom.xml, etc.)

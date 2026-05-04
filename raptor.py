@@ -397,6 +397,50 @@ def mode_scan(args: list) -> int:
                               "Running static analysis with Semgrep...")
 
 
+def mode_sca(args: list) -> int:
+    """Run mechanical Software Composition Analysis.
+
+    Delegates to ``libexec/raptor-sca`` which manages the run-lifecycle
+    metadata itself; we don't wrap with ``_run_with_lifecycle`` (which
+    is shaped for the Semgrep/CodeQL/AFL++ external-tool workflow).
+    """
+    script_root = Path(__file__).parent
+    sca_shim = script_root / "libexec" / "raptor-sca"
+    if not sca_shim.exists():
+        print(f"✗ SCA shim not found: {sca_shim}")
+        return 1
+
+    # Translate ``--repo <p>`` into the positional target the shim
+    # expects, so ``raptor.py sca --repo /path`` matches the convention
+    # of the other modes.
+    forwarded: list = []
+    target_from_repo = None
+    skip_next = False
+    for i, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--repo" and i + 1 < len(args):
+            target_from_repo = args[i + 1]
+            skip_next = True
+            continue
+        forwarded.append(arg)
+    if target_from_repo is not None:
+        forwarded.insert(0, target_from_repo)
+
+    cmd = [sys.executable, str(sca_shim)] + forwarded
+    try:
+        from core.config import RaptorConfig
+        result = subprocess.run(cmd, env=RaptorConfig.get_safe_env())
+        return result.returncode
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user")
+        return 130
+    except Exception as e:
+        print(f"\n✗ Error running raptor-sca: {e}")
+        return 1
+
+
 def mode_fuzz(args: list) -> int:
     """Run binary fuzzing with AFL++."""
     script_root = Path(__file__).parent
@@ -558,6 +602,7 @@ def show_mode_help(mode: str) -> None:
 _HELP_EPILOG = """
 Available Modes:
   scan        - Static code analysis with Semgrep
+  sca         - Software Composition Analysis (deps + advisories + SBOM)
   fuzz        - Binary fuzzing with AFL++
   web         - Web application security testing
   agentic     - Full autonomous workflow (Semgrep + CodeQL + LLM analysis)
@@ -659,6 +704,7 @@ def main():
     # Route to appropriate mode
     mode_handlers = {
         'scan': mode_scan,
+        'sca': mode_sca,
         'fuzz': mode_fuzz,
         'web': mode_web,
         'agentic': mode_agentic,

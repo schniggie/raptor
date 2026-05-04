@@ -1,0 +1,141 @@
+"""npm registry client.
+
+Fetches ``https://registry.npmjs.org/<name>`` and returns published
+versions, sorted newest-first, with pre-releases and deprecated
+versions filtered out.
+
+Same shape as ``PyPIClient`` — same ``RegistryClient`` Protocol.
+Caching: ``npm-versions:<name>`` with a 24h TTL by default.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import urllib.parse
+from typing import List, Optional
+
+from core.json import JsonCache
+from core.http import HttpClient
+
+logger = logging.getLogger(__name__)
+
+
+_CACHE_KEY_PREFIX = "npm-versions"
+_DEFAULT_TTL = 24 * 3600
+
+# Loose semver matcher; the registry's keys are canonical semver but we
+# guard against pre-release tags being treated as stable. Pre-releases
+# follow the ``-`` convention: ``1.0.0-rc.1``, ``1.0.0-beta``, etc.
+_PRERELEASE_RE = re.compile(r"-")
+
+
+class NpmClient:
+    """List versions from the npm registry."""
+
+    ecosystem = "npm"
+
+    def __init__(
+        self,
+        http: HttpClient,
+        cache: Optional[JsonCache] = None,
+        *,
+        ttl_seconds: int = _DEFAULT_TTL,
+        offline: bool = False,
+    ) -> None:
+        self._http = http
+        self._cache = cache
+        self._ttl = ttl_seconds
+        self._offline = offline
+
+    def get_metadata(self, name: str) -> Optional[dict]:
+        """Return the raw npm registry document for a package."""
+        encoded = urllib.parse.quote(name, safe="@")
+        cache_key = f"npm-meta:{name}"
+        if self._cache is not None:
+            cached = self._cache.get(cache_key, ttl_seconds=self._ttl)
+            if cached is not None:
+                return cached
+        if self._offline:
+            return None
+        try:
+            data = self._http.get_json(
+                f"https://registry.npmjs.org/{encoded}")
+        except Exception as e:                # noqa: BLE001
+            logger.warning("sca.registries.npm: meta fetch failed for %r: %s",
+                           name, e)
+            return None
+        if self._cache is not None:
+            self._cache.put(cache_key, data, ttl_seconds=self._ttl)
+        return data
+
+    def list_versions(self, name: str) -> List[str]:
+        # npm scoped names: ``@anthropic-ai/claude-code`` is URL-encoded
+        # as ``@anthropic-ai%2Fclaude-code`` (or sometimes as-is — the
+        # registry accepts both). We use ``urllib.parse.quote`` so the
+        # ``/`` is encoded.
+        encoded = urllib.parse.quote(name, safe="@")
+        cache_key = f"{_CACHE_KEY_PREFIX}:{name}"
+        if self._cache is not None:
+            cached = self._cache.get(cache_key, ttl_seconds=self._ttl)
+            if cached is not None:
+                return list(cached)
+
+        if self._offline:
+            return []
+
+        try:
+            data = self._http.get_json(
+                f"https://registry.npmjs.org/{encoded}")
+        except Exception as e:                # noqa: BLE001
+            logger.warning("sca.registries.npm: fetch failed for %r: %s",
+                           name, e)
+            return []
+
+        versions = _extract_versions(data)
+        if self._cache is not None:
+            self._cache.put(cache_key, versions, ttl_seconds=self._ttl)
+        return versions
+
+
+def _extract_versions(data: dict) -> List[str]:
+    """Pull stable versions from the npm registry document.
+
+    Shape:
+        {
+          "versions": {"1.0.0": {...}, "1.0.0-rc.1": {...}, ...},
+          "time": {"created": "...", "modified": "...",
+                   "1.0.0": "<iso>", "<ver>": "<iso>", ...},
+          "dist-tags": {"latest": "1.0.0"}
+        }
+
+    We sort by publish time (newest-first) using ``time``; if absent,
+    fall back to the ``versions`` map order.
+    """
+    versions = data.get("versions") or {}
+    if not isinstance(versions, dict):
+        return []
+    times = data.get("time") or {}
+    if not isinstance(times, dict):
+        times = {}
+
+    candidates: List[str] = []
+    for ver, meta in versions.items():
+        # Drop deprecated versions: npm marks these by setting the
+        # ``deprecated`` field on the package metadata.
+        if isinstance(meta, dict) and meta.get("deprecated"):
+            continue
+        # Drop pre-releases (any version with a ``-`` suffix).
+        if _PRERELEASE_RE.search(ver):
+            continue
+        candidates.append(ver)
+
+    # Sort by publish time descending; fall back to lexical sort if
+    # ``time`` is missing.
+    def _sort_key(v: str):
+        return times.get(v, "")
+    candidates.sort(key=_sort_key, reverse=True)
+    return candidates
+
+
+__all__ = ["NpmClient"]

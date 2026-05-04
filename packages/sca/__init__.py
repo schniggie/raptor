@@ -1,21 +1,41 @@
-"""RAPTOR SCA Package - Software Composition Analysis.
+"""RAPTOR SCA Package — Software Composition Analysis.
 
-Canonical host allowlist for /sca network egress.  Consumed by:
+Houses the SCA-specific config that the rest of the package threads
+into otherwise-generic ``core.http`` / ``core.json.cache`` machinery:
 
-  - ``packages.sca.agent`` when launching raptor-sca as a sandboxed
-    subprocess (``proxy_hosts=list(SCA_ALLOWED_HOSTS)``).
-  - ``raptor_agentic.py`` Phase 1b (same pattern).
-  - raptor-sca's own ``packages.sca.__init__.default_client()`` which
-    constructs an ``EgressClient`` with the same set.
-
-When a new registry or feed is added on the raptor-sca side, add the
-host here too so the sandbox permits the traffic.
+  - :data:`SCA_USER_AGENT` — pinned user-agent so /sca traffic is
+    identifiable in OSV / KEV / EPSS rate-limit logs.
+  - :data:`SCA_CACHE_ROOT` — default disk-cache root under
+    ``~/.raptor/cache/sca/``. Callers thread this as the explicit
+    fallback when the operator passes ``--cache-root`` as None.
+  - :data:`SCA_ALLOWED_HOSTS` — the full set of registries / vuln
+    feeds /sca needs to reach. Anything outside this set is refused
+    by the in-process egress proxy: a parser or registry-client
+    compromise can't exfiltrate beyond the hosts the operator
+    already implicitly trusts (they're how the project's deps were
+    installed in the first place). Adding a new registry client
+    requires adding its host here.
+  - :func:`default_client` — single seam where the HTTP backend is
+    chosen. Always returns an :class:`~core.http.egress_backend.EgressClient`
+    routed through ``core.sandbox.proxy`` with the allowlist above.
 """
 
-# The full set of hosts /sca needs to reach for vulnerability data and
-# registry metadata.  Mirrors the authoritative list in the raptor-sca
-# branch at ``packages/sca/__init__.py``.  Ordered by purpose.
-SCA_ALLOWED_HOSTS: tuple[str, ...] = (
+from __future__ import annotations
+
+from pathlib import Path
+
+from core.http import HttpClient
+from core.http.egress_backend import EgressClient
+
+SCA_USER_AGENT = "raptor-sca/0.1 (+https://github.com/gadievron/raptor)"
+SCA_CACHE_ROOT = Path.home() / ".raptor" / "cache" / "sca"
+
+# The full set of hosts /sca needs to reach for vuln data + registry
+# metadata. Ordered by purpose for readability; the egress proxy treats
+# the set as flat. Every host appears verbatim in at least one client's
+# URL constant under packages/sca/{osv,kev,epss}.py or
+# packages/sca/registries/.
+SCA_ALLOWED_HOSTS = (
     # Vulnerability feeds
     "api.osv.dev",
     "osv-vulnerabilities.storage.googleapis.com",   # OSV offline-DB zip mirror
@@ -53,3 +73,28 @@ SCA_ALLOWED_HOSTS: tuple[str, ...] = (
     "repo1.maven.org",                              # Maven Central mirror
     "api.github.com",                               # GHA ref→SHA resolution
 )
+
+
+def default_client() -> HttpClient:
+    """Return the default HttpClient for /sca.
+
+    Always routes through the in-process egress proxy at
+    :mod:`core.sandbox.proxy` with :data:`SCA_ALLOWED_HOSTS` enforced
+    by the proxy. The proxy is a process-wide singleton with UNION
+    semantics on the allowlist — multiple subsystems calling this
+    function (or constructing their own EgressClients) all share the
+    same proxy and the same allowlist union.
+
+    Tests bypass this seam by injecting an HttpClient directly via
+    dependency injection (``run_sca(..., http=StubHttp(...))``); they
+    never trigger proxy startup.
+    """
+    return EgressClient(SCA_ALLOWED_HOSTS, user_agent=SCA_USER_AGENT)
+
+
+__all__ = [
+    "SCA_ALLOWED_HOSTS",
+    "SCA_CACHE_ROOT",
+    "SCA_USER_AGENT",
+    "default_client",
+]

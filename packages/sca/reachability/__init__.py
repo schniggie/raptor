@@ -1,0 +1,247 @@
+"""Module-level reachability — orchestrator + per-language scanners.
+
+Public entry: ``scan(target, deps)`` returns a ``Dict[dep_key,
+Reachability]`` where ``dep_key`` is ``Dependency.key()``. The pipeline
+threads this map into ``findings.build_vuln_findings`` so each
+``VulnFinding`` carries a verdict + evidence lines.
+
+Python (AST-based), npm (regex sweep), Cargo, Go, RubyGems, NuGet,
+Composer all covered. Ecosystems without a handler return
+``not_evaluated`` so the reporter can be honest about the gap.
+
+**Tier-3 escalation (PyPI only):** when the caller passes ``http``
+plus a set of ``cve_dep_keys`` (deps that have at least one
+matching OSV advisory), every PyPI dep that came up
+``not_reachable`` after tiers 1 and 2 gets a second resolution pass
+with on-demand wheel-metadata fetch enabled
+(:mod:`packages.sca.python_modules`). Cost is bounded by a
+forever-cache keyed on (name, version) and gated to CVE-bearing
+deps so clean projects pay nothing extra. See ``design/sca.md``
+§856.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+
+from ..models import Confidence, Dependency, Reachability
+from . import cargo as _cargo
+from . import composer as _composer
+from . import gemfile as _gemfile
+from . import gomod as _gomod
+from . import nodejs as _nodejs
+from . import nuget as _nuget
+from . import python as _python
+
+logger = logging.getLogger(__name__)
+
+
+# Per-ecosystem scanner: returns the raw module → evidence map.
+_Scanner = Callable[
+    [Path],
+    Dict[str, List[Tuple[Path, int, bool]]],
+]
+# Per-ecosystem resolver: dep name + scan → Reachability.
+_Resolver = Callable[
+    [str, Dict[str, List[Tuple[Path, int, bool]]], Optional[Path]],
+    Reachability,
+]
+
+_HANDLERS: Dict[str, Tuple[_Scanner, _Resolver]] = {
+    "PyPI": (_python.scan_imports,
+             lambda name, scan, target=None:
+                 _python.resolve_dep(name, scan, target=target)),
+    "npm":  (_nodejs.scan_imports,
+             lambda name, scan, target=None:
+                 _nodejs.resolve_dep(name, scan, target=target)),
+    "Cargo": (_cargo.scan_imports,
+              lambda name, scan, target=None:
+                  _cargo.resolve_dep(name, scan, target=target)),
+    "Go": (_gomod.scan_imports,
+           lambda name, scan, target=None:
+               _gomod.resolve_dep(name, scan, target=target)),
+    "RubyGems": (_gemfile.scan_imports,
+                  lambda name, scan, target=None:
+                      _gemfile.resolve_dep(name, scan, target=target)),
+    "NuGet": (_nuget.scan_imports,
+              lambda name, scan, target=None:
+                  _nuget.resolve_dep(name, scan, target=target)),
+    "Packagist": (_composer.scan_imports,
+                   lambda name, scan, target=None:
+                       _composer.resolve_dep(name, scan, target=target)),
+}
+
+
+def scan(
+    target: Path, deps: Iterable[Dependency],
+    *,
+    http: Optional[Any] = None,
+    cache: Optional[Any] = None,
+    cve_dep_keys: Optional[Set[str]] = None,
+) -> Dict[str, Reachability]:
+    """Build per-dep ``Reachability`` for every dep we can analyse.
+
+    When ``http`` and ``cve_dep_keys`` are both provided, PyPI deps
+    in ``cve_dep_keys`` that come up ``not_reachable`` from the first
+    pass get a second pass with on-demand wheel-metadata fetch
+    enabled. This is the design's Tier-3 escalation: only deps that
+    matter (have a CVE) AND that the curated map + PEP 503 fallback
+    couldn't resolve pay the per-dep network cost. Other ecosystems
+    are unchanged — their resolvers don't know about wheel fetch.
+    """
+    deps_list = list(deps)
+    out: Dict[str, Reachability] = {}
+
+    by_eco: Dict[str, List[Dependency]] = defaultdict(list)
+    for d in deps_list:
+        by_eco[d.ecosystem].append(d)
+
+    # Cache the per-ecosystem ``scan_imports`` result so the Tier-3
+    # escalation pass (below) doesn't re-walk the source tree.
+    eco_scans: Dict[str, Dict[str, List[Tuple[Path, int, bool]]]] = {}
+
+    for eco, eco_deps in by_eco.items():
+        handler = _HANDLERS.get(eco)
+        if handler is None:
+            for d in eco_deps:
+                out[d.key()] = Reachability(
+                    verdict="not_evaluated",
+                    confidence=Confidence(
+                        "low",
+                        reason=f"reachability not implemented for {eco}",
+                    ),
+                    evidence=[],
+                )
+            continue
+        scanner, resolver = handler
+        try:
+            scan_result = scanner(target)
+        except Exception:                   # noqa: BLE001
+            logger.warning(
+                "sca.reachability: %s scanner failed; deps marked "
+                "not_evaluated", eco, exc_info=True,
+            )
+            for d in eco_deps:
+                out[d.key()] = Reachability(
+                    verdict="not_evaluated",
+                    confidence=Confidence(
+                        "low",
+                        reason=f"{eco} reachability scan errored",
+                    ),
+                    evidence=[],
+                )
+            continue
+        eco_scans[eco] = scan_result
+        # Dedup by dep name within ecosystem so multiple version rows
+        # for the same dep share one resolve call.
+        seen: Dict[str, Reachability] = {}
+        for d in eco_deps:
+            if d.name not in seen:
+                seen[d.name] = resolver(d.name, scan_result, target)
+            out[d.key()] = seen[d.name]
+
+    # Tier-3 escalation. Only PyPI today; other ecosystems' resolvers
+    # don't yet support wheel-style on-demand metadata. Gated on:
+    #   - caller supplied ``http`` (production path) — tests that
+    #     don't want network calls just don't pass it,
+    #   - ``cve_dep_keys`` is set — at least one OSV advisory matched,
+    #   - the dep is in that set,
+    #   - the first-pass verdict was ``not_reachable`` (the only
+    #     verdict the wheel fetch can possibly upgrade).
+    if http is not None and cve_dep_keys:
+        py_scan = eco_scans.get("PyPI")
+        if py_scan is not None:
+            _escalate_pypi_not_reachable(
+                deps_list, out, py_scan, target,
+                cve_dep_keys=cve_dep_keys, http=http, cache=cache,
+            )
+
+    return out
+
+
+def _escalate_pypi_not_reachable(
+    deps: List[Dependency],
+    out: Dict[str, Reachability],
+    py_scan: Dict[str, List[Tuple[Path, int, bool]]],
+    target: Path,
+    *,
+    cve_dep_keys: Set[str],
+    http: Any,
+    cache: Optional[Any],
+) -> None:
+    """Re-resolve PyPI ``not_reachable`` deps via on-demand wheel
+    metadata when they have CVEs. Mutates ``out`` in place.
+
+    Verdict translation: when tier-3 was attempted but didn't upgrade
+    the verdict to ``imported`` / ``likely_called`` (resolve_modules
+    returned None for ANY reason — sdist-only release, wheel >cap,
+    server didn't honour Range, parse error, registry hiccup — OR
+    the wheel's modules didn't match anything in the project scan),
+    the result is downgraded from ``not_reachable`` (medium-confidence
+    "we looked, no import found") to ``not_evaluated`` ("we tried
+    everything, can't tell"). Per design §856: pathological wheels
+    abort gracefully → ``not_evaluated``. Generalised here to every
+    tier-3 failure mode — they all share the "we engaged escalation
+    and it didn't help" semantic, and the risk-score multiplier
+    difference (``not_reachable high → 0.335×`` vs ``not_evaluated
+    → 0.85×``) makes the verdict materially affect ranking.
+    """
+    seen: Dict[str, Reachability] = {}
+    for d in deps:
+        if d.ecosystem != "PyPI":
+            continue
+        if d.key() not in cve_dep_keys:
+            continue
+        if d.version is None:
+            continue
+        current = out.get(d.key())
+        if current is None or current.verdict != "not_reachable":
+            continue
+        if d.name in seen:
+            out[d.key()] = seen[d.name]
+            continue
+        logger.info(
+            "sca.reachability: tier-3 escalation for %s==%s "
+            "(CVE-bearing, not_reachable from tiers 1+2)",
+            d.name, d.version,
+        )
+        try:
+            new_verdict = _python.resolve_dep(
+                d.name, py_scan, target=target,
+                version=d.version, http=http, cache=cache,
+            )
+        except Exception:                   # noqa: BLE001
+            logger.debug(
+                "sca.reachability: tier-3 fetch failed for %s==%s",
+                d.name, d.version, exc_info=True,
+            )
+            new_verdict = _not_evaluated_after_tier3(d)
+        else:
+            if new_verdict.verdict == "not_reachable":
+                # Tier-3 ran (resolve_dep didn't raise) but didn't
+                # find a module mapping that matches the scan.
+                # Downgrade verdict honestly.
+                new_verdict = _not_evaluated_after_tier3(d)
+        seen[d.name] = new_verdict
+        out[d.key()] = new_verdict
+
+
+def _not_evaluated_after_tier3(d: Dependency) -> Reachability:
+    return Reachability(
+        verdict="not_evaluated",
+        confidence=Confidence(
+            "low",
+            reason=(
+                f"tier-3 wheel-metadata fetch attempted for {d.name}"
+                f"=={d.version} but no module mapping resolved "
+                f"against project scan"
+            ),
+        ),
+        evidence=[],
+    )
+
+
+__all__ = ["scan"]

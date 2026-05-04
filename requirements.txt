@@ -59,3 +59,12 @@ defusedxml==0.7.1
 
 # SAGE persistent memory (consensus-validated knowledge)
 # pip install sage-agent-sdk==6.6.5 httpx==0.28.1
+
+# Optional: For /sca (Software Composition Analysis) parsers.
+# Each parser degrades gracefully (skip + warn) if its dependency is
+# missing — /sca still runs but loses coverage of that file format.
+#   - defusedxml : safe XML parsing for pom.xml / *.csproj
+#   - packaging  : PEP 508 / PEP 440 (requirements.txt, pyproject.toml)
+#   - tomli      : TOML reader on Python <3.11 (stdlib `tomllib` from 3.11+)
+#   - PyYAML     : pnpm-lock.yaml, yarn.lock (Berry)
+# pip install defusedxml packaging "tomli; python_version<'3.11'" PyYAML
