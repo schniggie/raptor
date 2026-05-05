@@ -86,6 +86,13 @@ def main(argv: Sequence[str]) -> int:
         enable_epss=True,
         enable_reachability=True,
         enable_supply_chain=True,
+        # ``--no-llm`` here disables both prepass-LLM and the
+        # major-bump impact analyser further down. Without this
+        # propagation, ``fix --no-llm`` would still pay the LLM
+        # behavioural-review + triage cost during the scan phase
+        # (~7-15s on a fresh process).
+        enable_llm_review=not args.no_llm,
+        enable_triage=not args.no_llm,
     )
     try:
         result = run_sca(target=target, output_dir=out_dir, options=options)
@@ -117,7 +124,16 @@ def main(argv: Sequence[str]) -> int:
     # ---- Phase 3: plan hygiene pins -----------------------------------------
     hygiene_plans = _plan_hygiene_pins(findings_rows, vuln_plans)
 
-    if not vuln_plans and not hygiene_plans and not major_blocked:
+    # ---- Phase 3a: detect GHA-action-ref drift (independent of pins) -------
+    has_gha_drift = any(
+        isinstance(r, dict)
+        and r.get("vuln_type") == "sca:supply_chain:gha_action_ref_drift"
+        for r in findings_rows
+    )
+    do_hash_pin = has_gha_drift and not args.no_hash_pin
+
+    if (not vuln_plans and not hygiene_plans and not major_blocked
+            and not do_hash_pin):
         print("raptor-sca fix: nothing to do — all deps are pinned and "
               "CVE-free.", file=sys.stderr)
         return 0
@@ -134,6 +150,10 @@ def main(argv: Sequence[str]) -> int:
     if not args.apply and not args.out:
         _print_dry_run(vuln_plans, hygiene_plans, major_blocked,
                        llm_approved=llm_approved, llm_verdicts=llm_verdicts)
+        if do_hash_pin:
+            hp_summary = _run_hash_pin(target, out_dir, write=False)
+            if hp_summary:
+                print(hp_summary)
         # Exit 1 when CVEs remain unresolved (blocked by major version).
         # CI can use this to detect "needs attention".
         return 1 if major_blocked else 0
@@ -220,6 +240,11 @@ def main(argv: Sequence[str]) -> int:
                 f"             apply with: cd {repo_root} && "
                 f"git apply {patch_path}"
             )
+
+    if do_hash_pin:
+        hp_summary = _run_hash_pin(target, out_dir, write=args.apply)
+        if hp_summary:
+            extra += "\n" + hp_summary
 
     if major_blocked:
         n = len(major_blocked)
@@ -379,6 +404,50 @@ def _plan_hygiene_pins(
             plan.advisory_ids = list(vuln_match.advisory_ids)
 
     return plans
+
+
+def _run_hash_pin(
+    target: Path, out_dir: Path, *, write: bool,
+) -> Optional[str]:
+    """Rewrite ``.github/workflows/*.yml`` ``uses:`` refs to commit
+    SHAs. Writes a ``hash-pin.json`` artefact alongside the run's
+    other outputs. Returns a one-line human-readable summary, or
+    ``None`` when there was nothing to do.
+
+    Shared between plan-only / --apply / --out modes:
+      - plan-only and ``--out``: ``write=False`` (rewrite plan only)
+      - ``--apply``: ``write=True`` (in-place rewrite of workflow YAMLs)
+    """
+    from .hash_pin import hash_pin_workflows
+    hp_result = hash_pin_workflows(target, write=write)
+    (out_dir / "hash-pin.json").write_text(
+        json.dumps({
+            "changed_files": [str(p) for p in hp_result.changed_files],
+            "changes": [
+                {"file": str(c.file), "line": c.line,
+                 "action": c.action,
+                 "old_ref": c.old_ref, "new_sha": c.new_sha}
+                for c in hp_result.changes
+            ],
+            "skipped": [
+                {"file": str(f), "line": ln, "action": a, "reason": r}
+                for f, ln, a, r in hp_result.skipped
+            ],
+        }, indent=2),
+        encoding="utf-8",
+    )
+    if not hp_result.changes:
+        return None
+    verb = "rewrote" if write else "would rewrite"
+    msg = (
+        f"raptor-sca fix: {verb} {len(hp_result.changes)} "
+        f"GHA action ref(s) across "
+        f"{len(hp_result.changed_files)} workflow file(s)"
+    )
+    if hp_result.skipped:
+        msg += f"; {len(hp_result.skipped)} skipped"
+    msg += f". Plan: {out_dir}/hash-pin.json"
+    return msg
 
 
 def _highest_version(versions) -> Optional[str]:
@@ -833,6 +902,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
                    help="skip all network calls; use cache only")
     p.add_argument("--no-llm", action="store_true",
                    help="skip LLM impact analysis (mechanical mode only)")
+    p.add_argument("--no-hash-pin", action="store_true",
+                   help="skip hash-pinning .github/workflows actions "
+                        "(default: rewrite mutable refs like @v6 to "
+                        "commit SHAs when ``gha_action_ref_drift`` "
+                        "findings are present)")
     p.add_argument("--no-cache", action="store_true",
                    help="bypass disk cache for this run")
     p.add_argument("--cache-root", help="override cache root")

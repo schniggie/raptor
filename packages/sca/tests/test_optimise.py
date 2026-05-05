@@ -633,6 +633,146 @@ class TestParseArgs:
         assert args.cache_root == "/tmp/c"
         assert args.verbose == 2
 
+    def test_no_hash_pin_flag_default_off(self):
+        """Default behaviour is to hash-pin GHA refs when drift findings
+        are present; ``--no-hash-pin`` opts out."""
+        args = optimise._parse_args(["/path"])
+        assert args.no_hash_pin is False
+
+    def test_no_hash_pin_flag_set(self):
+        args = optimise._parse_args(["/path", "--no-hash-pin"])
+        assert args.no_hash_pin is True
+
+
+class TestHashPinAutoTrigger:
+    """``fix`` runs hash_pin_workflows automatically when drift findings
+    are present, unless ``--no-hash-pin`` is set."""
+
+    def test_invokes_hash_pin_when_drift_findings_present(
+        self, tmp_path, monkeypatch,
+    ):
+        """When findings.json has a gha_action_ref_drift row,
+        ``hash_pin_workflows`` is called against the target."""
+        from packages.sca import optimise as opt
+        from packages.sca.hash_pin import HashPinResult
+
+        captured = {}
+        def fake_hash_pin(target, *, write):
+            captured["target"] = target
+            captured["write"] = write
+            return HashPinResult(changed_files=[], changes=[], skipped=[])
+
+        monkeypatch.setattr(
+            "packages.sca.hash_pin.hash_pin_workflows", fake_hash_pin,
+        )
+
+        # Stub the rest of the pipeline to focus on the hash-pin trigger.
+        target = tmp_path / "repo"
+        target.mkdir()
+        (target / "package.json").write_text(
+            '{"dependencies": {}}', encoding="utf-8",
+        )
+        out = tmp_path / "out"
+        out.mkdir()
+
+        # Synthesise findings with one gha_action_ref_drift row.
+        findings = [
+            {
+                "vuln_type": "sca:supply_chain:gha_action_ref_drift",
+                "file": str(target / ".github/workflows/test.yml"),
+                "function": "actions/checkout",
+                "severity": "low",
+                "sca": {
+                    "ecosystem": "Inline", "name": "<github-actions>",
+                    "version": "v6", "is_lockfile": False,
+                },
+            },
+        ]
+
+        from packages.sca.pipeline import RunResult
+        def fake_run_sca(**kw):
+            kw["output_dir"].mkdir(parents=True, exist_ok=True)
+            (kw["output_dir"] / "findings.json").write_text(
+                __import__("json").dumps(findings), encoding="utf-8",
+            )
+            return RunResult(
+                target=kw["target"], output_dir=kw["output_dir"],
+                deps_analysed=0, vuln_findings=0, in_kev=0,
+                supply_chain_findings=1, hygiene_findings=0,
+                suppressed_findings=0,
+                cache_hits=0, cache_misses=0,
+                llm_reviews_run=0, llm_reviews_failed=0,
+                triage_run=False, llm_cost=0.0,
+                findings_path=kw["output_dir"] / "findings.json",
+                report_path=kw["output_dir"] / "report.md",
+                sbom_path=kw["output_dir"] / "sbom.cdx.json",
+                sarif_path=kw["output_dir"] / "findings.sarif",
+                transitive_added=0, transitive_statuses=[],
+            )
+        monkeypatch.setattr(
+            "packages.sca.pipeline.run_sca", fake_run_sca,
+        )
+
+        opt.main([str(target), "--out", str(out)])
+        assert captured.get("target") == target
+        assert captured.get("write") is False, "plan-only mode → write=False"
+
+    def test_no_hash_pin_flag_skips_invocation(
+        self, tmp_path, monkeypatch,
+    ):
+        """``--no-hash-pin`` prevents the auto-trigger even with drift."""
+        from packages.sca import optimise as opt
+        from packages.sca.hash_pin import HashPinResult
+
+        called = []
+        def fake_hash_pin(target, *, write):
+            called.append(target)
+            return HashPinResult(changed_files=[], changes=[], skipped=[])
+        monkeypatch.setattr(
+            "packages.sca.hash_pin.hash_pin_workflows", fake_hash_pin,
+        )
+
+        target = tmp_path / "repo"
+        target.mkdir()
+        (target / "package.json").write_text(
+            '{"dependencies": {}}', encoding="utf-8",
+        )
+        out = tmp_path / "out"
+        out.mkdir()
+
+        findings = [{
+            "vuln_type": "sca:supply_chain:gha_action_ref_drift",
+            "file": str(target), "function": "x", "severity": "low",
+            "sca": {"ecosystem": "Inline", "name": "x",
+                     "version": "v1", "is_lockfile": False},
+        }]
+        from packages.sca.pipeline import RunResult
+        def fake_run_sca(**kw):
+            kw["output_dir"].mkdir(parents=True, exist_ok=True)
+            (kw["output_dir"] / "findings.json").write_text(
+                __import__("json").dumps(findings), encoding="utf-8",
+            )
+            return RunResult(
+                target=kw["target"], output_dir=kw["output_dir"],
+                deps_analysed=0, vuln_findings=0, in_kev=0,
+                supply_chain_findings=1, hygiene_findings=0,
+                suppressed_findings=0,
+                cache_hits=0, cache_misses=0,
+                llm_reviews_run=0, llm_reviews_failed=0,
+                triage_run=False, llm_cost=0.0,
+                findings_path=kw["output_dir"] / "findings.json",
+                report_path=kw["output_dir"] / "report.md",
+                sbom_path=kw["output_dir"] / "sbom.cdx.json",
+                sarif_path=kw["output_dir"] / "findings.sarif",
+                transitive_added=0, transitive_statuses=[],
+            )
+        monkeypatch.setattr(
+            "packages.sca.pipeline.run_sca", fake_run_sca,
+        )
+
+        opt.main([str(target), "--out", str(out), "--no-hash-pin"])
+        assert called == [], "hash_pin should not be called when --no-hash-pin"
+
 
 class TestPlanOutput:
     def test_prints_plan(self, capsys):

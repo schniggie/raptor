@@ -103,8 +103,9 @@ def hash_pin_workflows(
         if file_changes:
             changed_files.append(wf_path)
             if write:
+                from ._atomic import atomic_write_text
                 try:
-                    wf_path.write_text(new_text, encoding="utf-8")
+                    atomic_write_text(wf_path, new_text)
                 except OSError as e:
                     logger.warning("sca.hash_pin: cannot write %s: %s",
                                     wf_path, e)
