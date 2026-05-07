@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from core.dockerfile import parse_dockerfile
-from core.oci import parse_image_ref
+from core.oci import parse_image_ref, registry_hosts_for
 from core.oci.blob import extract_files_from_layer
 from core.oci.client import OciRegistryClient
 from core.oci.manifest import (
@@ -468,9 +468,53 @@ def scan_dockerfiles(
     return deps
 
 
+def dockerfile_registry_hosts(target: Path) -> List[str]:
+    """Return the union of registry hostnames the sandbox needs to
+    allow for every base image referenced in every Dockerfile under
+    ``target``.
+
+    This is the sandbox-config-time companion to
+    :func:`scan_dockerfiles`. Operators running SCA inside a
+    sandboxed run pass the result of this through to the sandbox's
+    ``proxy_hosts`` allowlist; without it the OCI client's
+    manifest / blob requests fail at the proxy with no useful
+    error.
+
+    Parsing is best-effort: a malformed Dockerfile or an
+    unparseable image ref logs a debug line and is skipped, never
+    aborts the walk. An empty list is a valid result (no Dockerfiles
+    in the target, or none with a registry-pulled FROM).
+
+    Output is deduplicated and sorted for deterministic
+    allowlist composition.
+    """
+    found: set = set()
+    for dockerfile in find_dockerfiles(target):
+        try:
+            text = dockerfile.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            logger.debug(
+                "sca.dockerfile_from: cannot read %s for sandbox host "
+                "extraction: %s", dockerfile, e,
+            )
+            continue
+        for entry in extract_from_lines(text):
+            try:
+                hosts = registry_hosts_for(entry.image)
+            except Exception as e:                  # noqa: BLE001
+                logger.debug(
+                    "sca.dockerfile_from: cannot resolve hosts for "
+                    "%s in %s: %s", entry.image, dockerfile, e,
+                )
+                continue
+            found.update(hosts)
+    return sorted(found)
+
+
 __all__ = [
     "FromEntry",
     "ImageSbom",
+    "dockerfile_registry_hosts",
     "extract_from_lines",
     "fetch_image_sbom",
     "find_dockerfiles",
