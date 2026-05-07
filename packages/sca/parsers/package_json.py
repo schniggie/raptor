@@ -17,6 +17,40 @@ Scope mapping:
 Pin-style classification covers npm's range grammar; anything we can't
 classify drops to ``unknown`` rather than guessing.
 
+Modern monorepo / workspace specs:
+
+- ``workspace:^1.0.0``, ``workspace:*``, ``workspace:~`` (pnpm /
+  Yarn Berry) — the dep is an internal workspace package, not a
+  registry entry. Recorded with ``pin_style=PATH`` and
+  ``version=None`` so OSV doesn't query it.
+- ``catalog:`` and ``catalog:<name>`` (pnpm 9) — references a
+  shared version pin in ``pnpm-workspace.yaml``. The parser walks
+  up to find that file (cached per-root), resolves the catalog
+  entry, and substitutes the actual version spec before
+  classification. Unresolved catalogs (no YAML, no entry, PyYAML
+  unavailable) are recorded with ``pin_style=UNKNOWN`` and a
+  diagnostic ``parser_confidence`` reason.
+
+Project-wide pins (``resolutions``, ``overrides``):
+
+- ``resolutions`` (Yarn classic + Berry) — pin a transitive dep
+  to a specific version, project-wide. The pin overrides whatever
+  the dep tree would otherwise resolve to.
+- ``overrides`` (npm 7+) — same mechanism, npm's name for it.
+
+Both fields are read and emitted as Dependency rows with
+``source_kind="override"``, ``direct=True``, and a high parser
+confidence — operators care about these because they're explicit
+security pins. CVE matching against the pinned version means
+operators see whether their pin actually clears the advisory.
+
+Nested ``overrides`` (``"overrides": {"foo": {"bar": "1.0"}}``,
+which means "pin bar to 1.0 within foo's tree") are flattened
+naively: each leaf produces one row. The rows lose the "only
+within X's tree" qualifier, but for advisory-matching purposes
+this over-reports rather than under-reports — the operator sees
+all pins.
+
 Lifecycle scripts (``preinstall``, ``install``, ``postinstall``,
 ``prepare``, ``prepublish``) are not recorded as Dependency rows here.
 The supply-chain heuristic layer reads the same file directly to flag
@@ -29,7 +63,7 @@ import json as _json
 import logging
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..models import Confidence, Dependency, PinStyle
 from . import register
@@ -108,7 +142,87 @@ def parse(path: Path) -> List[Dependency]:
                     )
                     deps.append(d)
 
+    # ``resolutions`` (Yarn classic + Berry) and ``overrides`` (npm 7+) —
+    # project-wide pins of transitive deps. Both fields are emitted as
+    # ``source_kind="override"`` so the report can group them, and
+    # advisory matching fires against the pinned version (operators
+    # care: "did my pin actually clear the CVE?").
+    for key in ("overrides", "resolutions"):
+        block = data.get(key)
+        if isinstance(block, dict):
+            for name, spec in _flatten_overrides(block):
+                d = _build_dep(name, spec, "main", path)
+                if d is not None:
+                    d.source_kind = "override"
+                    deps.append(d)
+
     return deps
+
+
+def _flatten_overrides(
+    block: Dict[str, object],
+    parent_chain: Tuple[str, ...] = (),
+) -> List[Tuple[str, str]]:
+    """Walk an ``overrides`` / ``resolutions`` block and yield
+    ``(package_name, version_spec)`` pairs.
+
+    Both flat (``"foo": "1.0"``) and nested (``"foo": {"bar": "1.0"}``,
+    "pin bar to 1.0 within foo's tree") shapes are supported.
+    Nested entries lose their tree-scoping context — every leaf
+    becomes one row. This over-reports rather than under-reports
+    for advisory-matching purposes; the operator sees all pins.
+
+    Yarn Berry's ``"foo@npm:^1.0": "1.0.5"`` descriptor-keyed shape
+    is normalised by stripping everything after the first ``@``
+    that comes after position 0 (``foo@npm:^1.0`` → ``foo``).
+    Scoped packages (``@scope/pkg@npm:^1.0``) keep the leading
+    ``@``.
+    """
+    out: List[Tuple[str, str]] = []
+    for raw_name, value in block.items():
+        if not isinstance(raw_name, str):
+            continue
+        name = _strip_descriptor(raw_name)
+        if not name:
+            continue
+        if isinstance(value, str):
+            out.append((name, value))
+        elif isinstance(value, dict):
+            # Yarn Berry's "." key inside a nested override is the
+            # tree-root version pin (most common case).
+            root_pin = value.get(".")
+            if isinstance(root_pin, str):
+                out.append((name, root_pin))
+            out.extend(_flatten_overrides(
+                {k: v for k, v in value.items() if k != "."},
+                parent_chain=parent_chain + (name,),
+            ))
+    return out
+
+
+def _strip_descriptor(spec_key: str) -> str:
+    """Normalise an ``overrides`` / ``resolutions`` key into a plain
+    package name.
+
+    ``foo`` → ``foo``
+    ``foo@npm:^1.0`` → ``foo``
+    ``@scope/pkg@npm:^1.0`` → ``@scope/pkg``
+    """
+    if spec_key.startswith("@"):
+        # Scoped: keep the leading @ and the first @ after the slash
+        # is the descriptor separator.
+        slash = spec_key.find("/")
+        if slash == -1:
+            return spec_key
+        rest = spec_key[slash:]
+        sep = rest.find("@")
+        if sep == -1:
+            return spec_key
+        return spec_key[:slash] + rest[:sep]
+    sep = spec_key.find("@")
+    if sep <= 0:
+        return spec_key
+    return spec_key[:sep]
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +274,44 @@ def _build_dep(
         # as opaque and skip rather than emit a half-row.
         return None
     spec = raw_spec.strip()
+
+    # ``catalog:`` reference (pnpm 9). Resolve via pnpm-workspace.yaml
+    # if findable; otherwise emit an UNKNOWN-pin row so the operator
+    # at least sees the dep name.
+    catalog_unresolved = False
+    if spec.startswith("catalog:"):
+        from ._pnpm_catalog import (
+            find_workspace_root,
+            get_catalogs,
+            resolve_catalog_spec,
+        )
+        root = find_workspace_root(path)
+        if root is not None:
+            catalogs = get_catalogs(root)
+            resolved = resolve_catalog_spec(spec, name, catalogs)
+            if resolved is not None:
+                spec = resolved.strip()
+            else:
+                catalog_unresolved = True
+        else:
+            catalog_unresolved = True
+        if catalog_unresolved:
+            return Dependency(
+                ecosystem=ECOSYSTEM,
+                name=name, version=None, declared_in=path, scope=scope,
+                is_lockfile=False, pin_style=PinStyle.UNKNOWN,
+                direct=True,
+                purl=_build_purl(name, None),
+                parser_confidence=Confidence(
+                    "low",
+                    reason=(
+                        f"pnpm catalog reference {raw_spec!r} could "
+                        f"not be resolved (no pnpm-workspace.yaml or "
+                        f"no matching catalog entry)"
+                    ),
+                ),
+            )
+
     pin_style, version, npm_alias_target = _classify(spec)
     purl_name = npm_alias_target or name
 
@@ -199,6 +351,13 @@ def _classify(spec: str) -> Tuple[PinStyle, Optional[str], Optional[str]]:
             inner_spec = ""
         pin, ver, _ = _classify(inner_spec)
         return pin, ver, target or None
+
+    # ``workspace:`` references (pnpm + Yarn Berry) — internal
+    # workspace package, not a registry entry. Marked as PATH so OSV
+    # lookups skip it. Forms: ``workspace:^1.0``, ``workspace:*``,
+    # ``workspace:~``, ``workspace:./pkgs/foo``.
+    if spec.startswith("workspace:"):
+        return PinStyle.PATH, None, None
 
     # Wildcards.
     if spec in ("*", "x", "X", "latest", ""):
