@@ -84,6 +84,13 @@ class RunOptions:
                                          # installs from Dockerfile,
                                          # devcontainer.json, shell scripts
                                          # and GHA workflows
+    enable_dockerfile_from: bool = True  # scan each Dockerfile FROM
+                                         # image's OS package db (Debian /
+                                         # Alpine / Red Hat) and feed
+                                         # the rows through OSV. Requires
+                                         # network — auto-skipped under
+                                         # ``--offline``. Disable via
+                                         # ``--no-dockerfile-from``.
     use_offline_db: bool = False         # route ``--offline`` lookups
                                          # through OsvOfflineDB when set
     offline_db_path: Optional[Path] = None  # location of the sqlite3 DB;
@@ -246,6 +253,33 @@ def run_sca(
                 "additional dep(s)", len(llm_inline_deps),
             )
             raw_deps.extend(llm_inline_deps)
+
+    # 1c. Dockerfile FROM base-image scanning. For each Dockerfile
+    #     in the target, resolve every FROM image through an OCI
+    #     registry and pull installed packages from
+    #     ``var/lib/dpkg/status`` / ``lib/apk/db/installed`` /
+    #     ``var/lib/rpm/rpmdb.sqlite``. The resulting Debian /
+    #     Alpine / Red Hat package rows feed into the same OSV
+    #     pipeline as the rest. Skipped under ``--offline`` because
+    #     it requires network access to the registry.
+    if options.enable_dockerfile_from and not options.offline:
+        from .dockerfile_from import scan_dockerfiles
+        from core.oci.client import OciRegistryClient
+        oci_client = OciRegistryClient(http=http)
+        try:
+            base_image_deps = scan_dockerfiles(target, client=oci_client)
+        except Exception:                           # noqa: BLE001
+            logger.warning(
+                "sca.pipeline: Dockerfile FROM scanning failed",
+                exc_info=True,
+            )
+            base_image_deps = []
+        if base_image_deps:
+            logger.info(
+                "sca.pipeline: Dockerfile FROM scanning found %d "
+                "base-image package(s)", len(base_image_deps),
+            )
+            raw_deps.extend(base_image_deps)
 
     joined = join_deps(raw_deps)
     logger.info("sca.pipeline: %d manifests, %d deps after join",

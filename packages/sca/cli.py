@@ -219,6 +219,7 @@ def _run_analyse(argv: List[str]) -> int:
         enable_supply_chain=not args.no_supply_chain,
         include_commented=args.include_commented,
         enable_inline_installs=not args.no_inline_installs,
+        enable_dockerfile_from=not args.no_dockerfile_from,
         use_offline_db=args.use_offline_db,
         offline_db_path=(Path(args.offline_db_path)
                           if args.offline_db_path else None),
@@ -407,6 +408,14 @@ def _parse_analyse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--no-inline-installs", action="store_true",
         help="skip Dockerfile / devcontainer.json / shell-script / GHA "
              "workflow extraction of pip / apt / yum / dnf / apk installs",
+    )
+    parser.add_argument(
+        "--no-dockerfile-from", action="store_true",
+        help="skip the Dockerfile FROM base-image scanner. The default "
+             "fetches each FROM image from its registry and pulls OS "
+             "package state (dpkg / apk / rpm) for OSV lookup. Disable "
+             "this when registry access is restricted or the operator "
+             "doesn't want network calls during scan.",
     )
     parser.add_argument(
         "--skip-review", action="store_true",

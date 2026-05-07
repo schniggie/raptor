@@ -37,10 +37,11 @@ What we don't extract (yet):
     discovered separately, so we'd just dedupe.
   - Cargo / npm / gem / brew: same shape, different syntax — straightforward
     to add when needed.
-  - Dockerfile ``FROM`` base-image qualification (``debian:11`` →
-    ``Debian:11``): currently we emit unqualified ``Debian`` / ``Red Hat``
-    / ``Alpine``, so OSV lookups may be partial. A FROM-detection pass is
-    a follow-up.
+  - Dockerfile ``FROM`` base-image scanning is handled by a sibling
+    module (``packages.sca.dockerfile_from``), not this parser. That
+    module pulls the actual installed-package state from the base
+    image's registry layers — much more accurate than guessing
+    Debian / Red Hat / Alpine from inline ``apt-get install`` lines.
 
 All emitted Dependency rows carry ``source_kind`` ∈ ``{"dockerfile",
 "devcontainer", "shell_script", "gha_workflow"}`` so the report can show
