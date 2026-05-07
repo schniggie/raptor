@@ -32,6 +32,7 @@ from . import cargo as _cargo
 from . import composer as _composer
 from . import gemfile as _gemfile
 from . import gomod as _gomod
+from . import maven as _maven
 from . import nodejs as _nodejs
 from . import nuget as _nuget
 from . import python as _python
@@ -72,6 +73,9 @@ _HANDLERS: Dict[str, Tuple[_Scanner, _Resolver]] = {
     "Packagist": (_composer.scan_imports,
                    lambda name, scan, target=None:
                        _composer.resolve_dep(name, scan, target=target)),
+    "Maven": (_maven.scan_imports,
+              lambda name, scan, target=None:
+                  _maven.resolve_dep(name, scan, target=target)),
 }
 
 

@@ -46,10 +46,13 @@ def test_scan_dispatches_to_python_and_npm(tmp_path: Path) -> None:
 def test_unsupported_ecosystem_returns_not_evaluated(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    deps = [_dep("g:a", ecosystem="Maven")]
+    # Debian deps come from inline-installs (Dockerfile RUN apt-get
+    # install) — no source-tree module-level scanner exists for
+    # them today; verify the orchestrator stays honest.
+    deps = [_dep("nginx", ecosystem="Debian")]
     out = scan(repo, deps)
     assert out[deps[0].key()].verdict == "not_evaluated"
-    assert "not implemented for Maven" in out[deps[0].key()].confidence.reason
+    assert "not implemented for Debian" in out[deps[0].key()].confidence.reason
 
 
 def test_scanner_failure_falls_back_to_not_evaluated(tmp_path: Path,
