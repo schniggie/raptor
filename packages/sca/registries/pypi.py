@@ -47,6 +47,41 @@ class PyPIClient:
         self._cache = cache
         self._ttl = ttl_seconds
         self._offline = offline
+        # Private-registry override — operator pointed PIP_INDEX_URL
+        # at an Artifactory / Nexus / GHE PyPI mirror. We rebase
+        # request URLs onto that host and (when set) thread an
+        # Authorization header on every call.
+        from ..private_registry import get as _get_override
+        over = _get_override("PyPI")
+        self._base_url = (
+            over.base_url.rstrip("/") if over and over.base_url
+            else "https://pypi.org"
+        )
+        self._auth_header = over.auth_header if over else None
+
+    def _build_url(self, name: str) -> str:
+        """Build a JSON-API URL pointed at the configured base.
+
+        PyPI's JSON API lives at ``<base>/pypi/<name>/json``. Mirrors
+        following the standard pip layout (Artifactory's PyPI repo,
+        Nexus's pypi-proxy) generally honour the same path; mirrors
+        that diverge can be reached by setting PIP_INDEX_URL to the
+        ``/pypi/`` parent so the path concatenation lands correctly.
+        """
+        # Strip trailing ``/simple/`` if present — PIP_INDEX_URL
+        # usually points at the simple-index path, but the JSON API
+        # is one level up.
+        base = self._base_url
+        if base.endswith("/simple"):
+            base = base[: -len("/simple")]
+        if base.endswith("/simple/"):
+            base = base[: -len("/simple/")]
+        return f"{base}/pypi/{name}/json"
+
+    def _request_headers(self) -> Optional[dict]:
+        if self._auth_header:
+            return {"Authorization": self._auth_header}
+        return None
 
     def get_metadata(self, name: str) -> Optional[dict]:
         """Return the raw PyPI JSON for a package — or ``None`` on miss.
@@ -63,7 +98,10 @@ class PyPIClient:
         if self._offline:
             return None
         try:
-            data = self._http.get_json(f"https://pypi.org/pypi/{canon}/json")
+            data = self._http.get_json(
+                self._build_url(canon),
+                headers=self._request_headers(),
+            )
         except Exception as e:                # noqa: BLE001
             logger.warning("sca.registries.pypi: meta fetch failed for %r: %s",
                            canon, e)
@@ -84,7 +122,10 @@ class PyPIClient:
             return []
 
         try:
-            data = self._http.get_json(f"https://pypi.org/pypi/{canon}/json")
+            data = self._http.get_json(
+                self._build_url(canon),
+                headers=self._request_headers(),
+            )
         except Exception as e:                # noqa: BLE001
             logger.warning("sca.registries.pypi: fetch failed for %r: %s",
                            canon, e)

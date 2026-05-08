@@ -124,9 +124,29 @@ def compose_proxy_hosts(target: "Optional[Path]" = None) -> list:
     The discovery failure is logged but not raised.
     """
     hosts = list(SCA_ALLOWED_HOSTS)
+    seen = set(hosts)
+
+    # Operator-supplied private-registry overrides (Artifactory /
+    # Nexus / GHE / etc.) — env-var-driven. Always consulted, with
+    # or without ``target``, since overrides are operator-level
+    # config, not project-level.
+    try:
+        from .private_registry import (
+            hosts_for_overrides, load_overrides,
+        )
+        for h in hosts_for_overrides(load_overrides()):
+            if h not in seen:
+                hosts.append(h)
+                seen.add(h)
+    except Exception:                               # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "sca: private-registry override discovery failed",
+            exc_info=True,
+        )
+
     if target is None:
         return hosts
-    seen = set(hosts)
     try:
         from .dockerfile_from import image_source_registry_hosts
         for h in image_source_registry_hosts(target):

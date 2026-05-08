@@ -41,6 +41,25 @@ class MavenClient:
         self._cache = cache
         self._ttl = ttl_seconds
         self._offline = offline
+        # Private-registry override (RAPTOR_SCA_MAVEN_REGISTRY).
+        # Maven mirrors typically expose ``/solrsearch/select`` and
+        # ``/maven2/`` paths (the same shape as Maven Central). When
+        # the operator's mirror diverges (Artifactory's pattern is
+        # ``/artifactory/api/search/...``), the env var should
+        # contain a base URL whose ``/solrsearch/select?q=...``
+        # path resolves correctly.
+        from ..private_registry import get as _get_override
+        over = _get_override("Maven")
+        self._base_url = (
+            over.base_url.rstrip("/") if over and over.base_url
+            else "https://search.maven.org"
+        )
+        self._auth_header = over.auth_header if over else None
+
+    def _request_headers(self) -> Optional[dict]:
+        if self._auth_header:
+            return {"Authorization": self._auth_header}
+        return None
 
     def list_versions(self, name: str) -> List[str]:
         if ":" not in name:
@@ -63,10 +82,12 @@ class MavenClient:
         # for almost every artifact; very long histories will be capped.
         q = (f"g:{urllib.parse.quote(group)}+AND+"
              f"a:{urllib.parse.quote(artifact)}")
-        url = (f"https://search.maven.org/solrsearch/select?q={q}"
+        url = (f"{self._base_url}/solrsearch/select?q={q}"
                f"&core=gav&rows=200&wt=json")
         try:
-            data = self._http.get_json(url)
+            data = self._http.get_json(
+                url, headers=self._request_headers(),
+            )
         except Exception as e:                # noqa: BLE001
             logger.warning("sca.registries.maven: fetch failed for %r: %s",
                            name, e)

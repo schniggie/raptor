@@ -47,6 +47,19 @@ class NpmClient:
         self._cache = cache
         self._ttl = ttl_seconds
         self._offline = offline
+        # Private-registry override (NPM_CONFIG_REGISTRY).
+        from ..private_registry import get as _get_override
+        over = _get_override("npm")
+        self._base_url = (
+            over.base_url.rstrip("/") if over and over.base_url
+            else "https://registry.npmjs.org"
+        )
+        self._auth_header = over.auth_header if over else None
+
+    def _request_headers(self) -> Optional[dict]:
+        if self._auth_header:
+            return {"Authorization": self._auth_header}
+        return None
 
     def get_metadata(self, name: str) -> Optional[dict]:
         """Return the raw npm registry document for a package."""
@@ -60,7 +73,9 @@ class NpmClient:
             return None
         try:
             data = self._http.get_json(
-                f"https://registry.npmjs.org/{encoded}")
+                f"{self._base_url}/{encoded}",
+                headers=self._request_headers(),
+            )
         except Exception as e:                # noqa: BLE001
             logger.warning("sca.registries.npm: meta fetch failed for %r: %s",
                            name, e)
@@ -86,7 +101,9 @@ class NpmClient:
 
         try:
             data = self._http.get_json(
-                f"https://registry.npmjs.org/{encoded}")
+                f"{self._base_url}/{encoded}",
+                headers=self._request_headers(),
+            )
         except Exception as e:                # noqa: BLE001
             logger.warning("sca.registries.npm: fetch failed for %r: %s",
                            name, e)

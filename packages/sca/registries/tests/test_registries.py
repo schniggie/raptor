@@ -37,7 +37,9 @@ class _FakeHttp:
         self.raise_exc = raise_exc
         self.calls: List[str] = []
 
-    def get_json(self, url: str, timeout: int = 30) -> Dict[str, Any]:
+    def get_json(self, url: str, timeout: int = 30,
+                 headers: Optional[Dict[str, str]] = None,
+                 ) -> Dict[str, Any]:
         self.calls.append(url)
         if self.raise_exc is not None:
             raise self.raise_exc
