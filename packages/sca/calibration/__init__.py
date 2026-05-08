@@ -17,7 +17,11 @@ Public entry points:
 """
 
 from .build import build_corpus
-# validate_corpus deferred to follow-up — needs accumulated
-# project samples first.
+from .project_samples import collect_project_samples
+from .validate import validate_corpus
 
-__all__ = ["build_corpus"]
+__all__ = [
+    "build_corpus",
+    "collect_project_samples",
+    "validate_corpus",
+]
