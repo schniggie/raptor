@@ -316,3 +316,239 @@ def test_strip_descriptor_scoped():
 
 def test_strip_descriptor_scoped_no_descriptor():
     assert _strip_descriptor("@types/react") == "@types/react"
+
+
+# ---------------------------------------------------------------------------
+# npm / Yarn workspaces — find_npm_workspace_root + workspace_root linkage
+# ---------------------------------------------------------------------------
+
+
+class TestNpmWorkspaceRoot:
+    """``find_npm_workspace_root`` walks up to find the root
+    ``package.json`` whose ``workspaces`` field globs to include a
+    given member path. Used by the ``package_json`` parser to stamp
+    ``Dependency.workspace_root`` so hygiene checks group correctly."""
+
+    def _project(self, tmp_path: Path, files: dict) -> Path:
+        for rel, contents in files.items():
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(contents)
+        return tmp_path
+
+    def test_finds_root_via_simple_glob(self, tmp_path: Path):
+        from packages.sca.parsers._pnpm_catalog import (
+            find_npm_workspace_root,
+        )
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({
+                "name": "monorepo",
+                "workspaces": ["packages/*"],
+            }),
+            "packages/foo/package.json": json.dumps({
+                "name": "foo", "version": "1.0",
+            }),
+            "packages/bar/package.json": json.dumps({
+                "name": "bar", "version": "1.0",
+            }),
+        })
+        assert find_npm_workspace_root(
+            root / "packages/foo/package.json"
+        ) == root.resolve()
+        assert find_npm_workspace_root(
+            root / "packages/bar/package.json"
+        ) == root.resolve()
+
+    def test_finds_root_via_explicit_path(self, tmp_path: Path):
+        """Workspaces field can list explicit paths, not just globs."""
+        from packages.sca.parsers._pnpm_catalog import (
+            find_npm_workspace_root,
+        )
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({
+                "workspaces": ["apps/web", "apps/api"],
+            }),
+            "apps/web/package.json": "{}",
+            "apps/api/package.json": "{}",
+            "apps/cli/package.json": "{}",       # NOT in workspaces
+        })
+        assert find_npm_workspace_root(
+            root / "apps/web/package.json"
+        ) == root.resolve()
+        assert find_npm_workspace_root(
+            root / "apps/api/package.json"
+        ) == root.resolve()
+        # cli isn't a member — no root.
+        assert find_npm_workspace_root(
+            root / "apps/cli/package.json"
+        ) is None
+
+    def test_yarn_nohoist_object_form(self, tmp_path: Path):
+        """Yarn classic accepts ``"workspaces": {"packages": [...]}``
+        for nohoist configurations."""
+        from packages.sca.parsers._pnpm_catalog import (
+            find_npm_workspace_root,
+        )
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({
+                "workspaces": {
+                    "packages": ["pkgs/*"],
+                    "nohoist": ["**/some-dep"],
+                },
+            }),
+            "pkgs/foo/package.json": "{}",
+        })
+        assert find_npm_workspace_root(
+            root / "pkgs/foo/package.json"
+        ) == root.resolve()
+
+    def test_negation_pattern_excludes_member(self, tmp_path: Path):
+        """``!packages/legacy`` excludes a path even if an earlier
+        glob included it."""
+        from packages.sca.parsers._pnpm_catalog import (
+            find_npm_workspace_root,
+        )
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({
+                "workspaces": ["packages/*", "!packages/legacy"],
+            }),
+            "packages/active/package.json": "{}",
+            "packages/legacy/package.json": "{}",
+        })
+        assert find_npm_workspace_root(
+            root / "packages/active/package.json"
+        ) == root.resolve()
+        assert find_npm_workspace_root(
+            root / "packages/legacy/package.json"
+        ) is None
+
+    def test_recursive_glob(self, tmp_path: Path):
+        """Yarn Berry's ``**`` matches arbitrary depth."""
+        from packages.sca.parsers._pnpm_catalog import (
+            find_npm_workspace_root,
+        )
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({
+                "workspaces": ["nested/**"],
+            }),
+            "nested/a/package.json": "{}",
+            "nested/a/b/package.json": "{}",
+        })
+        assert find_npm_workspace_root(
+            root / "nested/a/package.json"
+        ) == root.resolve()
+        assert find_npm_workspace_root(
+            root / "nested/a/b/package.json"
+        ) == root.resolve()
+
+    def test_no_workspaces_field_returns_none(self, tmp_path: Path):
+        from packages.sca.parsers._pnpm_catalog import (
+            find_npm_workspace_root,
+        )
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({"name": "single"}),
+            "lib/foo/package.json": "{}",
+        })
+        assert find_npm_workspace_root(
+            root / "lib/foo/package.json"
+        ) is None
+
+    def test_unreadable_or_malformed_skipped(self, tmp_path: Path):
+        """A package.json that's unreadable / non-JSON / non-object
+        shouldn't crash the walk-up — keep walking."""
+        from packages.sca.parsers._pnpm_catalog import (
+            find_npm_workspace_root,
+        )
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({"workspaces": ["**/foo"]}),
+            "broken/package.json": "this is not json",
+            "broken/foo/package.json": "{}",
+        })
+        assert find_npm_workspace_root(
+            root / "broken/foo/package.json"
+        ) == root.resolve()
+
+    def test_root_itself_isnt_member_of_its_own_workspaces(
+        self, tmp_path: Path,
+    ):
+        """find_npm_workspace_root(root_pkg) returns None — root
+        isn't a workspace member of itself."""
+        from packages.sca.parsers._pnpm_catalog import (
+            find_npm_workspace_root,
+        )
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({"workspaces": ["packages/*"]}),
+            "packages/foo/package.json": "{}",
+        })
+        assert find_npm_workspace_root(
+            root / "package.json"
+        ) is None
+
+
+class TestWorkspaceRootStampedOnDeps:
+    """``parse(member_pkg)`` populates ``Dependency.workspace_root``
+    with the monorepo root path, so hygiene checks group multi-
+    workspace deps under one logical project."""
+
+    def _project(self, tmp_path: Path, files: dict) -> Path:
+        for rel, contents in files.items():
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(contents)
+        return tmp_path
+
+    def test_member_deps_carry_workspace_root(self, tmp_path: Path):
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({"workspaces": ["packages/*"]}),
+            "packages/foo/package.json": json.dumps({
+                "name": "foo", "version": "1.0",
+                "dependencies": {"lodash": "^4.0.0"},
+            }),
+        })
+        deps = parse(root / "packages/foo/package.json")
+        assert len(deps) == 1
+        assert deps[0].workspace_root == root.resolve()
+
+    def test_root_deps_carry_workspace_root_pointing_at_self(
+        self, tmp_path: Path,
+    ):
+        """The workspace ROOT itself can have its own ``dependencies``.
+        Stamp them with workspace_root=root_dir too, so hygiene
+        groups root-deps with member-deps under the same monorepo
+        identity."""
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({
+                "workspaces": ["packages/*"],
+                "dependencies": {"react": "^18.0.0"},
+            }),
+        })
+        deps = parse(root / "package.json")
+        assert len(deps) == 1
+        assert deps[0].workspace_root == root.resolve()
+
+    def test_non_workspace_pkg_has_no_workspace_root(self, tmp_path: Path):
+        """A standalone package.json (no workspaces field, no parent
+        workspace) leaves workspace_root unset (None)."""
+        root = self._project(tmp_path, {
+            "package.json": json.dumps({
+                "name": "lonely",
+                "dependencies": {"lodash": "1.0.0"},
+            }),
+        })
+        deps = parse(root / "package.json")
+        assert len(deps) == 1
+        assert deps[0].workspace_root is None
+
+    def test_pnpm_workspace_takes_precedence(self, tmp_path: Path):
+        """When both pnpm-workspace.yaml AND a workspaces field
+        exist, the pnpm root wins (canonical for that toolchain)."""
+        root = self._project(tmp_path, {
+            "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
+            "package.json": json.dumps({"workspaces": ["packages/*"]}),
+            "packages/foo/package.json": json.dumps({
+                "name": "foo",
+                "dependencies": {"lodash": "1.0.0"},
+            }),
+        })
+        deps = parse(root / "packages/foo/package.json")
+        assert deps[0].workspace_root == root.resolve()

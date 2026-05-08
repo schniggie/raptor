@@ -156,6 +156,46 @@ def parse(path: Path) -> List[Dependency]:
                     d.source_kind = "override"
                     deps.append(d)
 
+    # ``workspaces`` linkage. If this package.json is the ROOT of an
+    # npm/Yarn workspace, stamp ``workspace_root`` on every dep with
+    # the root dir. If this package.json is a MEMBER of a workspace
+    # declared by an ancestor, stamp ``workspace_root`` with that
+    # ancestor's dir. Either way, the substrate downstream
+    # (hygiene checks, divergent-version detection) gets a stable
+    # identity for grouping.
+    #
+    # pnpm-workspace.yaml takes precedence when both exist (rare
+    # but legal — projects migrating between tooling sometimes carry
+    # both for compat). The pnpm root is the canonical workspace
+    # root for that toolchain; the npm-shaped ``workspaces`` field
+    # is usually present for ecosystem-tool compatibility, not for
+    # an actual second workspace structure.
+    if deps:
+        from ._pnpm_catalog import (
+            find_npm_workspace_root,
+            find_workspace_root as find_pnpm_workspace_root,
+        )
+        ws_root = (
+            find_pnpm_workspace_root(path)
+            or find_npm_workspace_root(path)
+        )
+        if ws_root is None:
+            # Maybe this IS the root: it has its own ``workspaces``
+            # field declaring members under itself. Stamp with
+            # ``path.parent`` so its deps cluster with the
+            # workspace's other members.
+            ws_field = data.get("workspaces")
+            has_ws_field = (
+                isinstance(ws_field, list)
+                or (isinstance(ws_field, dict)
+                    and isinstance(ws_field.get("packages"), list))
+            )
+            if has_ws_field:
+                ws_root = path.parent.resolve()
+        if ws_root is not None:
+            for d in deps:
+                d.workspace_root = ws_root
+
     return deps
 
 

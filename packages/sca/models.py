@@ -118,6 +118,21 @@ class Dependency:
                                     #     finding came from.
                                     # Renderers that don't consume the
                                     # field treat it as a black box.
+    workspace_root: Optional[Path] = None  # set when this dep was
+                                            # parsed from a npm / Yarn /
+                                            # pnpm workspace member; the
+                                            # path of the monorepo root
+                                            # (where the parent
+                                            # ``package.json`` with the
+                                            # ``workspaces`` field lives,
+                                            # or where ``pnpm-workspace.yaml``
+                                            # lives). Hygiene checks
+                                            # group multi-workspace
+                                            # findings under one logical
+                                            # project; cross-workspace
+                                            # divergent-version findings
+                                            # use this as the cluster
+                                            # key.
 
     def key(self) -> str:
         """Stable identity for dedup / cross-reference."""
