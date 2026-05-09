@@ -45,8 +45,8 @@ _CVSS_MISSING_DEFAULT = 5.0
 # KEV — known-exploited get a floor + multiplier. Floor of 80 means a
 # KEV CVE with low CVSS still ranks above a non-KEV high-CVSS finding,
 # matching the "active exploitation > theoretical severity" priority.
-_KEV_FLOOR = 80.0
-_KEV_MULTIPLIER = 1.20
+_KEV_FLOOR = 88.0
+_KEV_MULTIPLIER = 1.32
 
 # Exploit-evidence (Exploit-DB / Metasploit / GitHub PoC). KEV's the
 # strongest "actively exploited in the wild" signal, but it covers
@@ -77,7 +77,7 @@ _EPSS_MISSING_DEFAULT = 0.5
 # Reachability — confidently-not-reachable downgrades hard; uncertain
 # stays neutral. ``not_evaluated`` (no evidence either way) gets a
 # small penalty to nudge operators toward investigating.
-_REACH_NOT_REACHABLE_MAX_REDUCTION = 0.70
+_REACH_NOT_REACHABLE_MAX_REDUCTION = 0.63
 _REACH_NOT_EVALUATED_MULTIPLIER = 0.935
 
 # Exposure — call-site density. Maps 0.0..1.0 onto 0.5..1.0 so a dep

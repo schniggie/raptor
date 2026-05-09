@@ -91,7 +91,10 @@ def test_log4shell_kev_reachable_direct_scores_high():
     )
     score, comps = compute_risk_estimate(f, f.dependency)
     assert 90 <= score <= 100, f"got {score}"
-    assert comps["kev_multiplier"] == 1.20
+    # KEV multiplier was 1.20 pre-refit; bumped to 1.32 by the
+    # 2026-05-09 wider-grid refit applied via
+    # libexec/raptor-sca-refit-calibration --apply.
+    assert comps["kev_multiplier"] == 1.32
 
 
 def test_log4shell_but_not_reachable_drops_to_low():
@@ -119,7 +122,9 @@ def test_log4shell_but_not_reachable_drops_to_low():
 
 
 def test_log4shell_at_transitive_depth_3():
-    """Same vuln, but at depth 3 → ~33."""
+    """Same vuln, but at depth 3 → ~40 post the 2026-05-09 refit
+    (was ~33 with KEV_MULT=1.20; wider-grid refit pushed KEV_MULT
+    to 1.32 + KEV_FLOOR to 88, lifting the depth-3 score)."""
     transitive = _dep(direct=False)
     f = _finding(
         dep=transitive,
@@ -127,7 +132,7 @@ def test_log4shell_at_transitive_depth_3():
         reach_verdict="imported", exposure=1.0, depth=3,
     )
     score, _ = compute_risk_estimate(f, transitive)
-    assert 28 <= score <= 38, f"got {score}"
+    assert 35 <= score <= 45, f"got {score}"
 
 
 def test_background_hygiene_finding_scores_low():
