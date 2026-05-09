@@ -242,6 +242,15 @@ def grid_search_refit(
     # crossing KEV_MULT, NOT_EVALUATED becoming a bonus instead of
     # penalty). Inadmissible candidates produce a precision of -inf
     # so they're never picked even when they'd numerically maximise.
+    # `_search_metric` returns (top_20, top_50). max() over tuples
+    # compares lexicographically — top-20 dominates, top-50 breaks
+    # ties. The legacy scalar `_top_20_precision` is preserved for
+    # the verdict + report fields; the search itself runs on the
+    # tuple so once the corpus saturates top-20 at 1.000 the search
+    # keeps moving on top-50 instead of silently sticking to the
+    # first-seen candidate.
+    SENTINEL_INADMISSIBLE = (float("-inf"), float("-inf"))
+
     per_constant: List[ConstantRefit] = []
     for name in TUNABLE_CONSTANTS:
         cur = current[name]
@@ -250,22 +259,19 @@ def grid_search_refit(
             cur * (1.0 - max_delta),
             cur * (1.0 + max_delta),
         ]
-        precisions: List[float] = []
+        metrics: List[Tuple[float, float]] = []
         for c in candidates:
             full_values = {**current, name: c}
             ok, _reason = is_admissible(full_values)
             if not ok:
-                # Use -inf so this candidate is never chosen by argmax,
-                # even when its numeric precision would have been the
-                # highest. Recorded in `notes` below for transparency.
-                precisions.append(float("-inf"))
+                metrics.append(SENTINEL_INADMISSIBLE)
             else:
-                precisions.append(
-                    _top_20_precision(samples, overrides={name: c})
+                metrics.append(
+                    _search_metric(samples, overrides={name: c})
                 )
-        # Pick the highest precision; tie → keep current (index 0).
-        best_idx = max(range(3), key=lambda i: precisions[i])
-        if precisions[best_idx] <= precisions[0]:
+        # Pick the highest metric tuple; tie → keep current (index 0).
+        best_idx = max(range(3), key=lambda i: metrics[i])
+        if metrics[best_idx] <= metrics[0]:
             best_idx = 0
         # Note inadmissible rejections so the report is honest about
         # which candidate was filtered (and why), rather than silently
@@ -273,19 +279,24 @@ def grid_search_refit(
         for idx, c in enumerate(candidates):
             if idx == 0:
                 continue
-            if precisions[idx] == float("-inf"):
+            if metrics[idx] == SENTINEL_INADMISSIBLE:
                 _ok, reason = is_admissible({**current, name: c})
                 notes.append(
                     f"{name}={c:.4g} rejected: {reason}"
                 )
+        # Report fields keep the scalar top-20 precision (back-
+        # compat with operator dashboards / the auto-PR diff).
+        baseline_p20 = (metrics[0][0]
+                        if metrics[0] != SENTINEL_INADMISSIBLE else 0.0)
+        proposed_p20 = (metrics[best_idx][0]
+                        if metrics[best_idx] != SENTINEL_INADMISSIBLE
+                        else 0.0)
         per_constant.append(ConstantRefit(
             name=name,
             current=cur,
             proposed=candidates[best_idx],
-            baseline_precision=precisions[0]
-                if precisions[0] != float("-inf") else 0.0,
-            proposed_precision=precisions[best_idx]
-                if precisions[best_idx] != float("-inf") else 0.0,
+            baseline_precision=baseline_p20,
+            proposed_precision=proposed_p20,
         ))
 
     # Compose all proposed overrides and re-score. Per-constant
@@ -466,14 +477,39 @@ def _top_20_precision(
     """Re-score every finding under the given overrides and
     measure the fraction of the top 20 by score that have label=1.
 
-    Uses the same finding shape ``project_samples`` writes, plus
-    the multiplier-override hook on ``compute_risk_estimate``.
-    Falls back to the per-finding ``raptor_risk_estimate`` field
-    when re-scoring isn't possible (e.g. mocked test fixtures
-    that don't carry the full inputs).
+    Backwards-compatible scalar metric — kept for the existing
+    refit verdict + report fields. The grid search itself uses
+    `_search_metric` (a tuple of (top_20, top_50) precisions) so
+    when top-20 saturates at 1.0 across multiple candidates,
+    top-50 is the tiebreaker — without this, the search picks
+    the first-seen candidate even when a strictly-better-packed
+    top-50 exists.
+    """
+    return _search_metric(samples, overrides=overrides)[0]
+
+
+def _search_metric(
+    samples: List[Tuple[Dict[str, Any], int]],
+    *,
+    overrides: Optional[Dict[str, float]] = None,
+) -> Tuple[float, float]:
+    """Composite (top-20, top-50) precision used by the grid
+    search's argmax.
+
+    Tuple semantics: max() over Python tuples compares
+    lexicographically — top-20 dominates, top-50 acts only when
+    top-20 is tied. Once the corpus carries enough exploited
+    findings that the chosen weights push top-20 to 1.000, the
+    metric stops moving on top-20 alone; without the top-50
+    tiebreaker the search would silently keep the first-seen
+    candidate even when a later candidate packs top-50 with more
+    of the remaining exploited findings.
+
+    Returns ``(top_20, top_50)``. Both fall back to 0.0 when no
+    findings have a usable score.
     """
     if not samples:
-        return 0.0
+        return (0.0, 0.0)
     rescored: List[Tuple[float, int]] = []
     for finding_dict, label in samples:
         score = _rescore_finding(finding_dict, overrides)
@@ -481,12 +517,13 @@ def _top_20_precision(
             continue
         rescored.append((score, label))
     if not rescored:
-        return 0.0
+        return (0.0, 0.0)
     rescored.sort(key=lambda t: -t[0])
-    top = rescored[:20]
-    if not top:
-        return 0.0
-    return sum(label for _, label in top) / len(top)
+    top20 = rescored[:20]
+    top50 = rescored[:50]
+    p20 = (sum(l for _, l in top20) / len(top20)) if top20 else 0.0
+    p50 = (sum(l for _, l in top50) / len(top50)) if top50 else 0.0
+    return (p20, p50)
 
 
 def _rescore_finding(

@@ -409,3 +409,37 @@ def test_proposed_values_excludes_unchanged_constants():
         ],
     )
     assert report.proposed_values == {"_KEV_MULTIPLIER": 1.32}
+
+
+# ---------------------------------------------------------------------------
+# Tuple-metric tiebreaker — once top-20 saturates, top-50 wins
+# ---------------------------------------------------------------------------
+
+
+def test_search_metric_returns_top20_top50_tuple():
+    """The internal search uses (top_20, top_50). When two
+    candidates tie at top-20 (e.g. both saturate at 1.0), the
+    one with better top-50 packing wins."""
+    from packages.sca.calibration.refit import _search_metric
+    # Build 50 findings: top 20 all label=1, then a mix.
+    samples = []
+    for i in range(20):
+        samples.append((
+            {"raptor_risk_estimate": 100.0 - i,
+             "advisory": {}, "in_kev": False},
+            1,
+        ))
+    # Findings 21..50: 15 exploited interspersed
+    for i in range(20, 50):
+        label = 1 if i % 2 == 0 else 0
+        samples.append((
+            {"raptor_risk_estimate": 50.0 - (i - 20),
+             "advisory": {}, "in_kev": False},
+            label,
+        ))
+    p20, p50 = _search_metric(samples)
+    assert p20 == 1.0
+    # 20 of top-20 plus 15 of next 30 all in top-50 = 35 / 50
+    # Wait: top-50 is the first 50 sorted. We have 50 findings.
+    # 20 exploited at top + 15 alternating in 21..50 = 35 / 50.
+    assert p50 == 35 / 50
