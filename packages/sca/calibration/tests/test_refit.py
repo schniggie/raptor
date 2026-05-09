@@ -29,9 +29,10 @@ from packages.sca.calibration.refit import (
 
 def _write_signals(corpus_dir: Path, exploited_cves: List[str]) -> None:
     """Write a tiny KEV signals file marking the given CVEs as
-    exploited. Format mirrors what build.py emits."""
+    exploited. Format mirrors what build.py emits — top-level
+    ``signals`` dict keyed by CVE id."""
     (corpus_dir / "kev_signals.json").write_text(json.dumps({
-        "items": [{"cve_id": c} for c in exploited_cves],
+        "signals": {c: {} for c in exploited_cves},
     }))
 
 
@@ -100,21 +101,40 @@ def _make_finding(
 
 
 def test_ground_truth_aggregates_across_signal_files(tmp_path: Path):
+    """Real signal files (built by calibration/build.py) carry a
+    top-level ``signals`` dict keyed by CVE id. Loader must read
+    that shape — refit treated every finding as not-exploited for
+    months because the loader looked for an ``items`` list shape
+    that no signal file actually emits."""
     (tmp_path / "kev_signals.json").write_text(json.dumps({
-        "items": [{"cve_id": "CVE-2025-1"}],
+        "signals": {"CVE-2025-1": {"date_added": "2025-01-01"}},
     }))
     (tmp_path / "exploitdb_signals.json").write_text(json.dumps({
-        "items": [{"cve_id": "CVE-2025-2"}],
+        "signals": {"CVE-2025-2": {"edb_id": "12345"}},
     }))
     (tmp_path / "metasploit_signals.json").write_text(json.dumps({
-        "items": [{"aliases": ["CVE-2025-3", "GHSA-x"]}],
+        "signals": {"CVE-2025-3": {"module": "exploit/x"}},
+    }))
+    (tmp_path / "github_poc_signals.json").write_text(json.dumps({
+        "signals": {"CVE-2025-4": {"repo": "x/y"}},
     }))
     signals = _load_ground_truth(tmp_path)
     assert "CVE-2025-1" in signals
     assert "CVE-2025-2" in signals
     assert "CVE-2025-3" in signals
-    # Non-CVE aliases ignored.
-    assert "GHSA-x" not in signals
+    assert "CVE-2025-4" in signals
+
+
+def test_ground_truth_rejects_legacy_items_shape(tmp_path: Path):
+    """Old ``{"items": [...]}`` shape isn't what build.py emits;
+    loader must not silently accept it (the silent acceptance
+    cost us months of zero-baseline refit). With the wrong shape
+    it returns empty rather than misleadingly populating from a
+    file that won't match production data."""
+    (tmp_path / "kev_signals.json").write_text(json.dumps({
+        "items": [{"cve_id": "CVE-LEGACY-1"}],
+    }))
+    assert _load_ground_truth(tmp_path) == set()
 
 
 def test_ground_truth_handles_missing_files(tmp_path: Path):

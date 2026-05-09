@@ -364,7 +364,18 @@ def _load_findings_with_labels(
 
 def _load_ground_truth(corpus_dir: Path) -> set:
     """Union of CVE IDs marked as exploited across all ground-truth
-    signal files. Mirrors ``validate.py::_load_ground_truth``."""
+    signal files. Mirrors ``validate.py::_load_ground_truth``.
+
+    Signal files (built by ``calibration/build.py``) carry a top-
+    level ``signals`` dict mapping CVE-id → metadata. The dict's
+    keys ARE the CVE IDs we want. Earlier this function looked for
+    a top-level ``items`` list shape that no signal file actually
+    has — refit silently saw zero exploited CVEs and rejected every
+    proposed weight as "no improvement vs baseline 0.000". Test
+    fixtures were written to that wrong shape too, so the unit
+    tests passed against a format the production builder never
+    emitted. Fixed by matching the real format.
+    """
     signals: set = set()
     for fname in (
         "kev_signals.json", "exploitdb_signals.json",
@@ -377,21 +388,13 @@ def _load_ground_truth(corpus_dir: Path) -> set:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
-        # All signal files have a top-level "items" list with CVE-
-        # tagged entries. Each entry has a "cve_id" or list of
-        # aliases.
-        items = data.get("items") if isinstance(data, dict) else None
-        if not isinstance(items, list):
+        if not isinstance(data, dict):
             continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            cve = item.get("cve_id")
-            if isinstance(cve, str) and cve:
-                signals.add(cve)
-            for alias in item.get("aliases", []) or []:
-                if isinstance(alias, str) and alias.startswith("CVE-"):
-                    signals.add(alias)
+        sig_dict = data.get("signals")
+        if isinstance(sig_dict, dict):
+            for cve in sig_dict:
+                if isinstance(cve, str) and cve:
+                    signals.add(cve)
     return signals
 
 
