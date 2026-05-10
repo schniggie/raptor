@@ -155,8 +155,8 @@ def main(argv: Sequence[str]) -> int:
              JsonCache(root=Path(args.cache_root) if args.cache_root else SCA_CACHE_ROOT))
     osv = OsvClient(http, cache or JsonCache(root=SCA_CACHE_ROOT),
                     offline=args.offline)
-    from .kev import KevClient
-    from .epss import EpssClient
+    from core.cve import KevClient
+    from core.cve import EpssClient
     kev = KevClient(http, cache or JsonCache(root=SCA_CACHE_ROOT), offline=args.offline)
     epss = EpssClient(http, cache or JsonCache(root=SCA_CACHE_ROOT), offline=args.offline)
     registries = {

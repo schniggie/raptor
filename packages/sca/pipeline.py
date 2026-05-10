@@ -27,13 +27,13 @@ from core.json import JsonCache
 from core.progress import HackerProgressBar
 from . import SCA_CACHE_ROOT
 from .discovery import find_manifests
-from .epss import EpssClient
+from core.cve import EpssClient
 from .findings import build_vuln_findings, write_findings_json
 from .hygiene import evaluate as evaluate_hygiene
 from core.http import HttpClient
 from . import default_client
 from .join import join as join_deps
-from .kev import KevClient
+from core.cve import KevClient
 from .models import (
     Dependency,
     HygieneFinding,

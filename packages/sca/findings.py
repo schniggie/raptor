@@ -32,8 +32,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from .epss import EpssClient
-from .kev import KevClient
+from core.cve import EpssClient
+from core.cve import KevClient
 from .models import (
     Advisory,
     Confidence,

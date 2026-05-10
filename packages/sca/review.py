@@ -36,11 +36,11 @@ from typing import List, Optional, Sequence
 
 from core.json import JsonCache
 from . import SCA_CACHE_ROOT
-from .epss import EpssClient
+from core.cve import EpssClient
 from .findings import build_vuln_findings, severity_rank
 from core.http import HttpClient
 from . import default_client
-from .kev import KevClient
+from core.cve import KevClient
 from .models import (
     Confidence,
     Dependency,
