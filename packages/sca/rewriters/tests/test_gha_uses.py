@@ -147,12 +147,21 @@ def test_registry_dispatch_recognises_gha_workflow(tmp_path: Path) -> None:
 
 def test_yaml_file_outside_workflows_dir_not_routed(tmp_path: Path) -> None:
     """A YAML file outside ``.github/workflows/`` doesn't dispatch
-    to the GHA rewriter."""
+    to the GHA rewriter. Post-Phase-3.c the yaml_image rewriter
+    DOES match generic ``.yml`` files (for k8s / compose image:
+    lines) — but it doesn't match the GHA-shaped ``uses:`` line
+    in this test file, so no edit applies."""
     other = tmp_path / "config.yml"
     other.write_text("      - uses: actions/checkout@v4\n")
     edits = [RewriteEdit("actions/checkout", "v4", "v5")]
     results = rewrite(other, edits)
-    assert results == []
+    # The yaml_image rewriter is now registered against generic
+    # ``.yml`` predicate (Phase 3.c) so we get a "not_found"
+    # result rather than an empty list. Crucially: nothing
+    # APPLIED.
+    assert all(not r.applied for r in results)
+    # File untouched.
+    assert other.read_text() == "      - uses: actions/checkout@v4\n"
 
 
 # ---------------------------------------------------------------------------

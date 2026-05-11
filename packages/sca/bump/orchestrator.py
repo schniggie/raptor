@@ -281,6 +281,17 @@ def _enumerate_candidates(
         candidates.extend(from_candidates)
         skipped.extend(from_skipped)
 
+    # k8s / docker-compose / gitlab-ci ``image:`` refs — bump
+    # candidates from existing OCI-eco Dependency parsers.
+    # Reuses ``core/upstream_latest/oci_tags.latest_tag`` from
+    # Phase 2.b for the upstream lookup.
+    yaml_candidates, yaml_skipped = _enumerate_yaml_image_candidates(
+        target, http=http, cache=cache,
+        from_cache=latest_cache,
+    )
+    candidates.extend(yaml_candidates)
+    skipped.extend(yaml_skipped)
+
     # GitHub Actions ``uses:`` refs — bump candidates from
     # ``.github/workflows/*.yml`` files. Phase 3.b ships tag-
     # pinned support only; SHA-pinned refs (raptor's convention)
@@ -487,6 +498,110 @@ def _evaluate_one(
         bump_supply_chain_findings=findings,
         bump_vuln_findings=new_vulns,
     )
+
+
+def _enumerate_yaml_image_candidates(
+    target: Path,
+    *,
+    http,
+    cache,
+    from_cache: dict,
+) -> Tuple[List[BumpCandidate], List[Tuple[str, Path, str]]]:
+    """Walk YAML ``image:`` refs in compose / gitlab-ci / k8s
+    files via the existing SCA parsers. Each parser already
+    extracts OCI ``Dependency`` rows with ``ecosystem="OCI"``;
+    we convert each into a bump candidate by querying
+    ``oci_tags`` for upstream-latest.
+
+    Same filtering as FROM image candidates: skip digest-pinned
+    (immutable), skip non-stable-semver tags (variants /
+    aliases), skip at-latest.
+    """
+    from ..discovery import find_manifests
+    from ..parsers import parse_manifest
+    from core.upstream_latest._version_filter import parse_stable
+    from core.upstream_latest.github_releases import (
+        NoStableVersionsFound,
+        UpstreamLookupError,
+    )
+    from core.upstream_latest.oci_tags import latest_tag as oci_latest_tag
+
+    candidates: List[BumpCandidate] = []
+    skipped: List[Tuple[str, Path, str]] = []
+    # Reuse the parser dispatch to find OCI deps in YAML files.
+    # ``find_manifests`` walks the target; ``parse_manifest``
+    # dispatches per file shape.
+    try:
+        manifests = find_manifests(target)
+    except Exception:                       # noqa: BLE001
+        return candidates, skipped
+    for manifest in manifests:
+        # Only YAML manifest shapes; skip Dockerfiles (handled by
+        # the FROM walker), GHA workflows (handled by uses
+        # walker), package manifests (different concern).
+        if manifest.path.suffix.lower() not in (".yml", ".yaml"):
+            continue
+        # Skip GHA workflows — different walker / surface.
+        parts = manifest.path.parts
+        is_gha = any(
+            parts[i] == ".github" and parts[i + 1] == "workflows"
+            for i in range(len(parts) - 2)
+        )
+        if is_gha:
+            continue
+        try:
+            deps = parse_manifest(manifest)
+        except Exception:                # noqa: BLE001
+            continue
+        for dep in deps:
+            if dep.ecosystem != "OCI":
+                continue
+            current_tag = dep.version or ""
+            # Skip if no tag (digest-only or malformed).
+            if not current_tag:
+                continue
+            # Stable-semver filter (same as FROM walker).
+            if parse_stable(current_tag) is None:
+                continue
+            # Compose / k8s / gitlab-ci parsers preserve the
+            # image ref as-written (short form ``postgres``,
+            # registry-qualified ``ghcr.io/foo/bar``). Canonicalize
+            # through ``parse_image_ref`` so the locator we emit
+            # matches the convention shared with the Dockerfile-
+            # FROM walker (``{registry}/{repository}``).
+            from core.oci.image_ref import parse_image_ref
+            try:
+                ref = parse_image_ref(f"{dep.name}:{current_tag}")
+            except Exception:        # noqa: BLE001
+                continue
+            locator = f"{ref.registry}/{ref.repository}"
+            cache_key = ("oci_tag", locator)
+            if cache_key in from_cache:
+                target_tag = from_cache[cache_key]
+            else:
+                try:
+                    target_tag = oci_latest_tag(
+                        locator, http=http, cache=cache,
+                    )
+                except (UpstreamLookupError, NoStableVersionsFound) as e:
+                    skipped.append((
+                        locator, manifest.path,
+                        f"OCI tag lookup failed: {e}",
+                    ))
+                    from_cache[cache_key] = None
+                    continue
+                from_cache[cache_key] = target_tag
+            if not target_tag or target_tag == current_tag:
+                continue
+            candidates.append(BumpCandidate(
+                kind="yaml_image",
+                locator=locator,
+                file=manifest.path,
+                current_version=current_tag,
+                target_version=target_tag,
+                upstream=None,
+            ))
+    return candidates, skipped
 
 
 _USES_RE = re.compile(

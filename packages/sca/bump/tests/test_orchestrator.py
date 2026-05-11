@@ -954,6 +954,129 @@ def test_render_report_surfaces_new_cves_inline(tmp_path: Path) -> None:
     assert "new-CVE GHSA-new-bad" in text
 
 
+# ---------------------------------------------------------------------------
+# YAML image: refs (Phase 3.c)
+# ---------------------------------------------------------------------------
+
+def test_compose_image_with_stable_semver_becomes_candidate(
+    tmp_path: Path,
+) -> None:
+    """``compose.yml`` with ``image: postgres:15`` and upstream
+    has ``16`` → bump candidate emitted via the existing OCI
+    upstream-latest path."""
+    (tmp_path / "compose.yml").write_text(
+        "services:\n"
+        "  db:\n"
+        "    image: postgres:15\n"
+    )
+    http = _StubHttp({
+        "https://registry-1.docker.io/v2/library/postgres/tags/list?n=100":
+            {"name": "library/postgres",
+             "tags": ["15", "16", "16.1"]},
+    })
+    report = run_bump(tmp_path, http=http)
+    yaml_cands = [c for c in report.candidates
+                   if c.kind == "yaml_image"]
+    assert len(yaml_cands) == 1
+    c = yaml_cands[0]
+    assert c.locator == "docker.io/library/postgres"
+    assert c.current_version == "15"
+    assert c.target_version == "16.1"
+
+
+def test_compose_apply_writes_image_tag(tmp_path: Path) -> None:
+    """End-to-end: ``--apply`` rewrites the compose file's image
+    tag."""
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        "services:\n"
+        "  db:\n"
+        "    image: postgres:15\n"
+    )
+    http = _StubHttp({
+        "https://registry-1.docker.io/v2/library/postgres/tags/list?n=100":
+            {"name": "library/postgres",
+             "tags": ["15", "16"]},
+    })
+    run_bump(tmp_path, http=http, apply=True)
+    assert "image: postgres:16" in compose.read_text()
+
+
+def test_k8s_manifest_image_walked(tmp_path: Path) -> None:
+    """k8s ``Deployment`` manifest with a container image ref —
+    bump candidate via the existing k8s parser."""
+    (tmp_path / "deploy.yaml").write_text(
+        "apiVersion: apps/v1\n"
+        "kind: Deployment\n"
+        "metadata:\n"
+        "  name: web\n"
+        "spec:\n"
+        "  template:\n"
+        "    spec:\n"
+        "      containers:\n"
+        "        - name: nginx\n"
+        "          image: nginx:1.25\n"
+    )
+    http = _StubHttp({
+        "https://registry-1.docker.io/v2/library/nginx/tags/list?n=100":
+            {"name": "library/nginx",
+             "tags": ["1.25", "1.27"]},
+    })
+    report = run_bump(tmp_path, http=http)
+    yaml_cands = [c for c in report.candidates
+                   if c.kind == "yaml_image"]
+    assert len(yaml_cands) == 1
+    assert yaml_cands[0].current_version == "1.25"
+    assert yaml_cands[0].target_version == "1.27"
+
+
+def test_gha_workflow_image_NOT_walked_as_yaml_image(tmp_path: Path) -> None:
+    """``.github/workflows/*.yml`` files are excluded from the
+    yaml_image walker — they're the GHA-uses walker's territory.
+    Even if the workflow has an ``image:`` line (job container),
+    we don't emit a yaml_image candidate."""
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n"
+        "  build:\n"
+        "    container:\n"
+        "      image: python:3.11\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+    )
+    http = _StubHttp({
+        "https://registry-1.docker.io/v2/library/python/tags/list?n=100":
+            {"name": "library/python", "tags": ["3.11", "3.12"]},
+        "https://api.github.com/repos/actions/checkout/releases/latest":
+            {"tag_name": "v5"},
+    })
+    report = run_bump(tmp_path, http=http)
+    yaml_cands = [c for c in report.candidates
+                   if c.kind == "yaml_image"]
+    # No yaml_image candidate — the GHA workflow is excluded.
+    assert yaml_cands == []
+    # But the GHA-uses walker DID emit its candidate.
+    gha_cands = [c for c in report.candidates
+                  if c.kind == "gha_uses"]
+    assert len(gha_cands) == 1
+
+
+def test_compose_variant_tag_silently_skipped(tmp_path: Path) -> None:
+    """``image: postgres:15-alpine`` — variant tag, not clean
+    semver. Walker skips silently (same convention as
+    Dockerfile FROM walker)."""
+    (tmp_path / "compose.yml").write_text(
+        "services:\n"
+        "  db:\n"
+        "    image: postgres:15-alpine\n"
+    )
+    http = _StubHttp({})
+    report = run_bump(tmp_path, http=http)
+    assert [c for c in report.candidates
+             if c.kind == "yaml_image"] == []
+
+
 def test_upstream_lookup_dedups_across_dockerfiles(tmp_path: Path) -> None:
     """Two Dockerfiles both pinning SEMGREP_VERSION should hit
     the upstream-latest endpoint ONCE — the orchestrator caches
