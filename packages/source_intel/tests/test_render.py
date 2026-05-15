@@ -331,6 +331,45 @@ def test_returns_nonnull_renders_with_caveat():
     assert "alloc_or_die" in text
 
 
+def test_conditional_on_appends_caveat_to_evidence_line():
+    """When the observation is under an #ifdef, the rendered line
+    must carry an explicit caveat — without it, Stage D may infer
+    hardening that doesn't apply in the actual build."""
+    from packages.source_intel.analyze import KIND_WUR, AttributeEvidence
+    ev = AttributeEvidence(
+        kind=KIND_WUR,
+        function_name="alloc_thing",
+        location=("compiler.h", 5),
+        match_source="literal",
+        raw_match="__attribute__((warn_unused_result))",
+        conditional_on="CONFIG_HARDENING",
+    )
+    r = SourceIntelResult(attributes=(ev,))
+    lines = derive_evidence_strings(r)
+    text = "\n".join(lines)
+    assert "CONDITIONAL" in text
+    assert "CONFIG_HARDENING" in text
+    assert "downweight" in text.lower()
+
+
+def test_no_caveat_when_unconditional():
+    """No caveat when conditional_on is None — single rendered line
+    without the suffix."""
+    from packages.source_intel.analyze import KIND_WUR, AttributeEvidence
+    ev = AttributeEvidence(
+        kind=KIND_WUR,
+        function_name="alloc_thing",
+        location=("h.h", 5),
+        match_source="literal",
+        raw_match="__attribute__((warn_unused_result))",
+        # conditional_on=None — the default
+    )
+    r = SourceIntelResult(attributes=(ev,))
+    lines = derive_evidence_strings(r)
+    text = "\n".join(lines)
+    assert "CONDITIONAL" not in text
+
+
 def test_returns_nonnull_warns_when_delete_null_checks_on():
     """If the annotation is wrong AND -fdelete-null-pointer-checks is
     on, defensive caller null checks may be eliminated. The renderer

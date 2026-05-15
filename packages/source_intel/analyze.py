@@ -65,6 +65,11 @@ class AttributeEvidence:
     ``nonnull``, …). Axis-1-expansion adds more kinds; the data shape
     stays uniform so render / adapter code dispatches on ``kind``
     rather than carrying class-specific subtypes.
+
+    ``conditional_on`` captures the innermost ``#if*`` condition
+    enclosing the match (None when the match is unconditional). The
+    Stage D consumer downweights matches whose condition wasn't
+    confirmed-active in the actual build.
     """
 
     kind: str  # one of ``ALL_KINDS``
@@ -72,6 +77,7 @@ class AttributeEvidence:
     location: Tuple[str, int]  # (file_path, line)
     match_source: str  # "literal" | "known_alias" | "project_alias"
     raw_match: str  # actual spelling for provenance
+    conditional_on: Optional[str] = None  # innermost enclosing #if* condition
 
 
 def WurEvidence(  # noqa: N802 — back-compat factory for Phase 2 callers
@@ -79,6 +85,7 @@ def WurEvidence(  # noqa: N802 — back-compat factory for Phase 2 callers
     location: Tuple[str, int],
     match_source: str,
     raw_match: str,
+    conditional_on: Optional[str] = None,
 ) -> AttributeEvidence:
     """Back-compat factory: returns an :class:`AttributeEvidence` with
     ``kind="wur"``. Phase 2 callers (tests, downstream code) used the
@@ -91,6 +98,7 @@ def WurEvidence(  # noqa: N802 — back-compat factory for Phase 2 callers
         location=location,
         match_source=match_source,
         raw_match=raw_match,
+        conditional_on=conditional_on,
     )
 
 
@@ -113,6 +121,11 @@ class SourceIntelResult:
 
     #: All attribute observations across all kinds.
     attributes: Tuple[AttributeEvidence, ...] = ()
+
+    #: Project-specific alias macros discovered in the target's
+    #: headers, keyed by kind. Empty when discovery skipped (target
+    #: had no headers or only the curated table was used).
+    discovered_aliases: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
 
     @property
     def is_skipped(self) -> bool:
@@ -306,10 +319,29 @@ def analyze(
             for match in result.matches:
                 observations.extend(_parse_match_to_attribute(match))
 
-    # Augment cocci output with curated-alias scanning for WUR.
-    # Phase 3: alias-scan covers WUR only; per-attribute alias coverage
-    # comes with axis-1-expansion's project-alias discovery pass.
+    # Project-specific alias discovery: walk target headers, classify
+    # `#define MACRO __attribute__((...))` patterns by family, count
+    # usage, cap per family.
+    try:
+        from packages.source_intel.discovery import discover_aliases
+        discovery = discover_aliases(target)
+        discovered_alias_tuple = tuple(
+            (family, names)
+            for family, names in sorted(discovery.aliases_by_family.items())
+        )
+    except ImportError:
+        discovered_alias_tuple = ()
+
+    # Augment cocci output with alias scanning. Phase 2 shipped curated
+    # WUR aliases only; Phase 3c also scans for project-discovered
+    # aliases (any kind) with provenance = "project_alias".
     observations.extend(_scan_alias_observations(target))
+    observations.extend(
+        _scan_project_alias_observations(
+            target,
+            discovered_alias_tuple,
+        )
+    )
 
     return SourceIntelResult(
         target=str(target),
@@ -317,6 +349,7 @@ def analyze(
         rules_failed=tuple(rules_failed),
         spatch_version=spatch_version(),
         attributes=tuple(observations),
+        discovered_aliases=discovered_alias_tuple,
     )
 
 
@@ -346,6 +379,11 @@ def _parse_match_to_attribute(match: Any) -> List[AttributeEvidence]:
     ``<kind>:<function_name>`` where ``<kind>`` is one of ``ALL_KINDS``.
     Other message shapes are ignored (future-proof for non-attrs
     axes that may share this parser path).
+
+    ``conditional_on`` is captured by looking up the innermost
+    enclosing ``#if*`` block at the match's (file, line). The lookup
+    is cached file-by-file; multiple matches in the same file share
+    the parse cost.
     """
     msg = (getattr(match, "message", "") or "").strip()
     if ":" not in msg:
@@ -355,12 +393,24 @@ def _parse_match_to_attribute(match: Any) -> List[AttributeEvidence]:
     func_name = func_name.strip()
     if not func_name or kind not in ALL_KINDS:
         return []
+    file_path = getattr(match, "file", "")
+    line_no = int(getattr(match, "line", 0))
+
+    # Import locally to keep conditional capture optional — if the
+    # module is stripped from a minimal install, evidence still emits.
+    try:
+        from packages.source_intel.conditional import enclosing_condition
+        cond = enclosing_condition(file_path, line_no) if file_path else None
+    except ImportError:
+        cond = None
+
     return [AttributeEvidence(
         kind=kind,
         function_name=func_name,
-        location=(getattr(match, "file", ""), int(getattr(match, "line", 0))),
+        location=(file_path, line_no),
         match_source="literal",
         raw_match=_KIND_TO_RAW_MATCH.get(kind, ""),
+        conditional_on=cond,
     )]
 
 
@@ -403,6 +453,73 @@ def _scan_alias_observations(target: Path) -> List[AttributeEvidence]:
         seen_files += 1
         observations.extend(_scan_alias_in_file(entry))
     return observations
+
+
+def _scan_project_alias_observations(
+    target: Path,
+    discovered_alias_tuple: Tuple[Tuple[str, Tuple[str, ...]], ...],
+) -> List[AttributeEvidence]:
+    """For each discovered project-specific alias macro, scan source
+    files for occurrences and emit ``match_source="project_alias"``
+    evidence.
+
+    Limitations match the curated-alias scan: function-name attribution
+    is best-effort (empty). The per-alias cocci rules planned for
+    future axes will bind aliases to functions; this pass just records
+    that the macro appears in a C source file.
+    """
+    observations: List[AttributeEvidence] = []
+    if not target.is_dir():
+        return observations
+
+    # Build a flat list of (kind, alias_name) tuples for the scan.
+    alias_pairs: List[Tuple[str, str]] = []
+    for family, names in discovered_alias_tuple:
+        for name in names:
+            alias_pairs.append((family, name))
+    if not alias_pairs:
+        return observations
+
+    seen_files = 0
+    for entry in target.rglob("*"):
+        if seen_files >= 500:
+            break
+        if not entry.is_file():
+            continue
+        if entry.suffix.lower() not in _C_CPP_EXTS:
+            continue
+        seen_files += 1
+        try:
+            text = entry.read_text(errors="replace")
+        except OSError:
+            continue
+        for family, alias_name in alias_pairs:
+            # Word-boundary check; substring would risk false positives
+            # on prefix-overlap (FOO_CHECK vs MUST_CHECK).
+            if not _is_word_present(text, alias_name):
+                continue
+            # First-occurrence line for prompt context.
+            line_no = 0
+            for n, line in enumerate(text.split("\n"), start=1):
+                if _is_word_present(line, alias_name):
+                    line_no = n
+                    break
+            observations.append(AttributeEvidence(
+                kind=family,
+                function_name="",  # see scan_alias_in_file docstring
+                location=(str(entry), line_no),
+                match_source="project_alias",
+                raw_match=alias_name,
+            ))
+    return observations
+
+
+def _is_word_present(text: str, word: str) -> bool:
+    """Word-boundary substring check. Avoids false positives where
+    one macro name is a prefix of another (e.g. ``CHECK`` matching in
+    ``CHECK_RETURN``)."""
+    import re as _re
+    return bool(_re.search(r"\b" + _re.escape(word) + r"\b", text))
 
 
 def _scan_alias_in_file(path: Path) -> List[AttributeEvidence]:

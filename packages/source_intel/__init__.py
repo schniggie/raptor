@@ -26,11 +26,17 @@ from packages.source_intel.analyze import (
     analyze,
 )
 from packages.source_intel.cache import SourceIntelCache
+from packages.source_intel.conditional import enclosing_condition
+from packages.source_intel.discovery import (
+    DiscoveryResult,
+    discover_aliases,
+)
 from packages.source_intel.render import derive_evidence_strings
 
 __all__ = [
     "ALL_KINDS",
     "AttributeEvidence",
+    "DiscoveryResult",
     "KIND_ALLOC_SIZE",
     "KIND_NONNULL",
     "KIND_RETURNS_NONNULL",
@@ -41,4 +47,6 @@ __all__ = [
     "WurEvidence",
     "analyze",
     "derive_evidence_strings",
+    "discover_aliases",
+    "enclosing_condition",
 ]

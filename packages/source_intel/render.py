@@ -112,16 +112,39 @@ def _render_attribute_line(
     style: str,
 ) -> Optional[str]:
     """Dispatch to the per-kind renderer. Unknown kinds return None
-    (silently dropped — render is best-effort)."""
+    (silently dropped — render is best-effort).
+
+    When ``conditional_on`` is set, the rendered line is suffixed with
+    a caveat: matches under unknown ``#ifdef`` blocks may not apply
+    to the binary that was actually built.
+    """
     if ev.kind == KIND_WUR:
-        return _render_wur_line(ev, build_flags, style)
-    if ev.kind == KIND_NONNULL:
-        return _render_nonnull_line(ev, build_flags, style)
-    if ev.kind == KIND_ALLOC_SIZE:
-        return _render_alloc_size_line(ev, build_flags, style)
-    if ev.kind == KIND_RETURNS_NONNULL:
-        return _render_returns_nonnull_line(ev, build_flags, style)
-    return None
+        line = _render_wur_line(ev, build_flags, style)
+    elif ev.kind == KIND_NONNULL:
+        line = _render_nonnull_line(ev, build_flags, style)
+    elif ev.kind == KIND_ALLOC_SIZE:
+        line = _render_alloc_size_line(ev, build_flags, style)
+    elif ev.kind == KIND_RETURNS_NONNULL:
+        line = _render_returns_nonnull_line(ev, build_flags, style)
+    else:
+        return None
+    return _append_conditional_caveat(line, ev)
+
+
+def _append_conditional_caveat(
+    line: str,
+    ev: AttributeEvidence,
+) -> str:
+    """Append the ``conditional_on`` caveat when the match is under
+    an ``#if*`` block. Caller-side ``derive_evidence_strings`` consumes
+    the suffix as part of the single evidence string."""
+    if not ev.conditional_on:
+        return line
+    return (
+        f"{line} (CONDITIONAL: this annotation is gated by "
+        f"`#if* {ev.conditional_on}` — downweight unless the actual "
+        f"build is known to enable this config.)"
+    )
 
 
 # =====================================================================

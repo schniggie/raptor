@@ -304,6 +304,65 @@ def test_e2e_real_spatch_detects_literal_returns_nonnull(tmp_path):
     not shutil.which("spatch"),
     reason="spatch not installed — skip real-spatch E2E",
 )
+def test_e2e_captures_conditional_on_for_ifdef_wrapped_attr(tmp_path):
+    """A WUR-annotated function under #ifdef must surface ``conditional_on``.
+
+    Stage D consumer uses this to downweight matches behind unknown
+    config — without it, the LLM might infer hardening when the
+    actual build excluded the attribute."""
+    src = tmp_path / "wrapped.c"
+    src.write_text(
+        "#ifdef CONFIG_HARDENING\n"
+        "__attribute__((warn_unused_result))\n"
+        "int alloc_thing(int sz);\n"
+        "#endif\n"
+    )
+
+    r = analyze(tmp_path)
+    from packages.source_intel.conditional import clear_cache
+    clear_cache()
+    wur = [ev for ev in r.attributes
+           if ev.kind == "wur" and ev.match_source == "literal"]
+    assert wur, "expected a literal WUR observation"
+    assert wur[0].conditional_on == "CONFIG_HARDENING", (
+        f"expected conditional_on='CONFIG_HARDENING'; got "
+        f"{wur[0].conditional_on!r}"
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("spatch"),
+    reason="spatch not installed — skip real-spatch E2E",
+)
+def test_e2e_discovers_project_alias_and_emits_project_alias_evidence(tmp_path):
+    """Target with a project-defined __must_check alias — discovery
+    finds the macro, alias-scan emits ``match_source='project_alias'``
+    evidence for source files where the macro is used."""
+    (tmp_path / "compiler.h").write_text(
+        "#define MY_MUST_CHECK __attribute__((__warn_unused_result__))\n"
+    )
+    (tmp_path / "lib.c").write_text(
+        "MY_MUST_CHECK int validate(int x);\n"
+    )
+
+    r = analyze(tmp_path)
+    # Discovery should surface in result.
+    discovered = dict(r.discovered_aliases)
+    assert "MY_MUST_CHECK" in discovered.get("wur", ())
+
+    # Project-alias evidence should be emitted for the source file.
+    project_aliases = [ev for ev in r.attributes
+                       if ev.match_source == "project_alias"]
+    assert any(ev.raw_match == "MY_MUST_CHECK" for ev in project_aliases), (
+        f"expected MY_MUST_CHECK project-alias observation; "
+        f"got: {project_aliases!r}"
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("spatch"),
+    reason="spatch not installed — skip real-spatch E2E",
+)
 def test_e2e_axis_dispatch_runs_multiple_rules(tmp_path):
     """When the target has both WUR and nonnull annotations, BOTH
     rules in the attrs/ axis fire — confirms the axis-dir iteration
