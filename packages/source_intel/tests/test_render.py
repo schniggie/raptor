@@ -256,3 +256,92 @@ def test_nonnull_and_wur_both_rendered():
     text = "\n".join(lines)
     assert "warn_unused_result" in text
     assert "nonnull" in text.lower()
+
+
+# =====================================================================
+# alloc_size + returns_nonnull rendering (Phase 3b)
+# =====================================================================
+
+
+def _alloc_size(function_name="my_malloc"):
+    from packages.source_intel.analyze import KIND_ALLOC_SIZE, AttributeEvidence
+    return AttributeEvidence(
+        kind=KIND_ALLOC_SIZE,
+        function_name=function_name,
+        location=("a.c", 10),
+        match_source="literal",
+        raw_match="__attribute__((alloc_size(...)))",
+    )
+
+
+def _returns_nonnull(function_name="must_succeed"):
+    from packages.source_intel.analyze import (
+        KIND_RETURNS_NONNULL, AttributeEvidence,
+    )
+    return AttributeEvidence(
+        kind=KIND_RETURNS_NONNULL,
+        function_name=function_name,
+        location=("a.c", 10),
+        match_source="literal",
+        raw_match="__attribute__((returns_nonnull))",
+    )
+
+
+def test_alloc_size_renders_with_fortify_caveat_unknown():
+    r = SourceIntelResult(attributes=(_alloc_size("alloc_buf"),))
+    lines = derive_evidence_strings(r)
+    text = "\n".join(lines)
+    assert "alloc_size" in text.lower()
+    assert "alloc_buf" in text
+    # No FORTIFY signal — caveat must say so.
+    assert "fortify_source status unknown" in text.lower()
+
+
+def test_alloc_size_renders_with_fortify_2_active():
+    bf = BuildFlagsContext(
+        source="compile_commands.json",
+        extraction_confidence="high",
+        fortify_source_level=2,
+    )
+    r = SourceIntelResult(attributes=(_alloc_size(),))
+    lines = derive_evidence_strings(r, build_flags=bf)
+    text = "\n".join(lines)
+    assert "fortify_source" in text.lower()
+    assert "runtime" in text.lower()
+
+
+def test_alloc_size_renders_with_fortify_disabled():
+    bf = BuildFlagsContext(
+        source="compile_commands.json",
+        extraction_confidence="high",
+        fortify_source_level=0,
+    )
+    r = SourceIntelResult(attributes=(_alloc_size(),))
+    lines = derive_evidence_strings(r, build_flags=bf)
+    text = "\n".join(lines)
+    # Should note no runtime protection.
+    assert "disabled" in text.lower() or "no runtime" in text.lower()
+
+
+def test_returns_nonnull_renders_with_caveat():
+    r = SourceIntelResult(attributes=(_returns_nonnull("alloc_or_die"),))
+    lines = derive_evidence_strings(r)
+    text = "\n".join(lines)
+    assert "returns_nonnull" in text.lower() or "never to return NULL".lower() in text.lower()
+    assert "alloc_or_die" in text
+
+
+def test_returns_nonnull_warns_when_delete_null_checks_on():
+    """If the annotation is wrong AND -fdelete-null-pointer-checks is
+    on, defensive caller null checks may be eliminated. The renderer
+    must convey this risk."""
+    bf = BuildFlagsContext(
+        source="compile_commands.json",
+        extraction_confidence="high",
+        delete_null_pointer_checks=True,
+    )
+    r = SourceIntelResult(attributes=(_returns_nonnull(),))
+    lines = derive_evidence_strings(r, build_flags=bf)
+    text = "\n".join(lines)
+    assert "wrong" in text.lower()
+    assert "eliminate" in text.lower()

@@ -23,7 +23,9 @@ from typing import List, Optional
 
 from core.build.build_flags import BuildFlagsContext
 from packages.source_intel.analyze import (
+    KIND_ALLOC_SIZE,
     KIND_NONNULL,
+    KIND_RETURNS_NONNULL,
     KIND_WUR,
     AttributeEvidence,
     SourceIntelResult,
@@ -115,6 +117,10 @@ def _render_attribute_line(
         return _render_wur_line(ev, build_flags, style)
     if ev.kind == KIND_NONNULL:
         return _render_nonnull_line(ev, build_flags, style)
+    if ev.kind == KIND_ALLOC_SIZE:
+        return _render_alloc_size_line(ev, build_flags, style)
+    if ev.kind == KIND_RETURNS_NONNULL:
+        return _render_returns_nonnull_line(ev, build_flags, style)
     return None
 
 
@@ -224,6 +230,134 @@ def _nonnull_null_check_phrase(build_flags: Optional[BuildFlagsContext]) -> str:
             "Build flags explicitly enable -fdelete-null-pointer-checks "
             "— compiler may dead-code-eliminate redundant null checks "
             "inside the function; a real NULL would reach the deref."
+        )
+    return (
+        "Compiler-elimination status not pinned by observed flags — "
+        "default depends on -O level and compiler version."
+    )
+
+
+def _render_alloc_size_line(
+    ev: AttributeEvidence,
+    build_flags: Optional[BuildFlagsContext],
+    style: str,
+) -> str:
+    """Render alloc_size evidence.
+
+    The annotation tells the compiler the return buffer's byte size.
+    When FORTIFY_SOURCE is on, this unlocks __builtin_object_size and
+    fortified intrinsics (memcpy_chk etc.) — operations on the return
+    value get bounds-checked at runtime. Without FORTIFY_SOURCE, the
+    annotation is mostly hint-for-analyzers.
+    """
+    fn_text = (
+        f"function `{ev.function_name}`"
+        if ev.function_name
+        else f"function in {ev.location[0]} at line {ev.location[1]}"
+    )
+
+    fortify_phrase = _alloc_size_fortify_phrase(build_flags)
+
+    if style == "stage_d":
+        prefix = "Author intent + compiler signal — alloc_size"
+    elif style == "exploit_plan":
+        prefix = "Constraint — alloc_size advertises returned buffer size"
+    else:
+        prefix = "Variant hint — alloc_size annotation"
+
+    return (
+        f"{prefix}: {fn_text} returns a buffer whose byte size equals "
+        f"the value of the annotated parameter(s). {fortify_phrase}"
+    )
+
+
+def _alloc_size_fortify_phrase(build_flags: Optional[BuildFlagsContext]) -> str:
+    if build_flags is None or build_flags.extraction_confidence == "absent":
+        return (
+            "FORTIFY_SOURCE status unknown (build flags not in evidence); "
+            "any runtime bounds-checking on the returned buffer depends "
+            "on _FORTIFY_SOURCE level at compile time."
+        )
+    level = build_flags.fortify_source_level
+    if level is None:
+        return (
+            "FORTIFY_SOURCE not set in observed flags; the alloc_size "
+            "annotation gives the static-analyzer hint but no runtime "
+            "bounds-check on the buffer."
+        )
+    if level >= 2:
+        return (
+            f"FORTIFY_SOURCE=_{level}_ — fortified intrinsics will "
+            f"bounds-check operations against the returned buffer at "
+            f"runtime; some overflows in the caller would be caught."
+        )
+    if level == 1:
+        return (
+            "FORTIFY_SOURCE=1 — limited runtime bounds-checking active; "
+            "caller-side memcpy_chk catches overflows when the source "
+            "length is also known statically."
+        )
+    return (
+        "_FORTIFY_SOURCE=0 (explicitly disabled); annotation is "
+        "static-analyzer-only, no runtime protection."
+    )
+
+
+def _render_returns_nonnull_line(
+    ev: AttributeEvidence,
+    build_flags: Optional[BuildFlagsContext],
+    style: str,
+) -> str:
+    """Render returns_nonnull evidence.
+
+    Author promises the function never returns NULL. Callers may
+    legitimately skip null checks. If the annotation is wrong AND
+    -fdelete-null-pointer-checks is enabled (gcc userspace default),
+    the compiler may also dead-code-eliminate any defensive null
+    checks the caller DID write — making a wrong annotation actively
+    dangerous.
+    """
+    fn_text = (
+        f"function `{ev.function_name}`"
+        if ev.function_name
+        else f"function in {ev.location[0]} at line {ev.location[1]}"
+    )
+
+    caveat = _returns_nonnull_caveat_phrase(build_flags)
+
+    if style == "stage_d":
+        prefix = "Author claim — returns_nonnull"
+    elif style == "exploit_plan":
+        prefix = "Constraint — caller may skip null check on return"
+    else:
+        prefix = "Variant hint — returns_nonnull annotation"
+
+    return (
+        f"{prefix}: {fn_text} promises never to return NULL. {caveat}"
+    )
+
+
+def _returns_nonnull_caveat_phrase(
+    build_flags: Optional[BuildFlagsContext],
+) -> str:
+    if build_flags is None or build_flags.extraction_confidence == "absent":
+        return (
+            "Compiler-elimination status unknown (build flags not in "
+            "evidence); if the annotation is wrong, a returned NULL "
+            "may bypass defensive caller checks depending on "
+            "-fdelete-null-pointer-checks."
+        )
+    if build_flags.delete_null_pointer_checks is False:
+        return (
+            "Build flags include -fno-delete-null-pointer-checks — "
+            "defensive null checks in the caller are preserved even if "
+            "the annotation is incorrect."
+        )
+    if build_flags.delete_null_pointer_checks is True:
+        return (
+            "Build flags enable -fdelete-null-pointer-checks — if the "
+            "annotation is wrong, compiler may eliminate caller-side "
+            "null checks, making a returned NULL a real deref."
         )
     return (
         "Compiler-elimination status not pinned by observed flags — "

@@ -15,7 +15,9 @@ source_intel") for the design + axis roadmap.
 
 from packages.source_intel.analyze import (
     ALL_KINDS,
+    KIND_ALLOC_SIZE,
     KIND_NONNULL,
+    KIND_RETURNS_NONNULL,
     KIND_WUR,
     SCHEMA_VERSION,
     AttributeEvidence,
@@ -29,7 +31,9 @@ from packages.source_intel.render import derive_evidence_strings
 __all__ = [
     "ALL_KINDS",
     "AttributeEvidence",
+    "KIND_ALLOC_SIZE",
     "KIND_NONNULL",
+    "KIND_RETURNS_NONNULL",
     "KIND_WUR",
     "SCHEMA_VERSION",
     "SourceIntelCache",

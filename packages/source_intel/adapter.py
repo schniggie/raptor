@@ -33,7 +33,9 @@ from typing import Dict, Optional, Tuple
 from core.dataflow.finding import Finding
 from core.dataflow.validator import ValidatorVerdict
 from packages.source_intel.analyze import (
+    KIND_ALLOC_SIZE,
     KIND_NONNULL,
+    KIND_RETURNS_NONNULL,
     KIND_WUR,
     AttributeEvidence,
     SourceIntelResult,
@@ -57,6 +59,21 @@ _KIND_RELEVANT_RULE_PREFIXES: Dict[str, Tuple[str, ...]] = {
         "c/null-dereference",
     ),
     KIND_NONNULL: (
+        "cpp/null-dereference",
+        "c/null-dereference",
+    ),
+    # alloc_size is mostly informational for memory-corruption findings:
+    # tells the LLM "this function's return is a buffer of size N",
+    # which is highly relevant when reasoning about CWE-120 / CWE-122
+    # (where the bug is over-running an allocated buffer).
+    KIND_ALLOC_SIZE: (
+        "cpp/unbounded-write",
+        "cpp/uncontrolled-",        # uncontrolled-allocation-size
+    ),
+    # returns_nonnull is relevant when the finding is about a NULL deref:
+    # caller may have skipped a null check trusting the annotation; if
+    # the annotation is wrong, the deref fires.
+    KIND_RETURNS_NONNULL: (
         "cpp/null-dereference",
         "c/null-dereference",
     ),

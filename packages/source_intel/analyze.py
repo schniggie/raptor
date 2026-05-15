@@ -46,8 +46,15 @@ SCHEMA_VERSION = 1
 #: one of these to be parsed.
 KIND_WUR = "wur"
 KIND_NONNULL = "nonnull"
+KIND_ALLOC_SIZE = "alloc_size"
+KIND_RETURNS_NONNULL = "returns_nonnull"
 
-ALL_KINDS: Tuple[str, ...] = (KIND_WUR, KIND_NONNULL)
+ALL_KINDS: Tuple[str, ...] = (
+    KIND_WUR,
+    KIND_NONNULL,
+    KIND_ALLOC_SIZE,
+    KIND_RETURNS_NONNULL,
+)
 
 
 @dataclass(frozen=True)
@@ -326,6 +333,8 @@ def analyze(
 _KIND_TO_RAW_MATCH: Dict[str, str] = {
     KIND_WUR: "__attribute__((warn_unused_result))",
     KIND_NONNULL: "__attribute__((nonnull))",
+    KIND_ALLOC_SIZE: "__attribute__((alloc_size(...)))",
+    KIND_RETURNS_NONNULL: "__attribute__((returns_nonnull))",
 }
 
 

@@ -258,6 +258,88 @@ def test_nonnull_function_in_snippet_returns_exploitable_for_null_deref(tmp_path
         assert v.validate(finding) == ValidatorVerdict.EXPLOITABLE
 
 
+def test_alloc_size_function_in_snippet_returns_exploitable_for_unbounded_write(tmp_path):
+    """alloc_size on a buffer-returning function whose result is then
+    written to without bounds-checking — CWE-120 finding gets verdict
+    support from the annotation (annotation tells the LLM how big the
+    buffer ACTUALLY is)."""
+    from packages.source_intel.analyze import KIND_ALLOC_SIZE, AttributeEvidence
+
+    (tmp_path / "test.c").write_text("void *alloc_buf(int sz);\n")
+    finding = _finding(str(tmp_path / "test.c"),
+                       "cpp/unbounded-write",
+                       "p = alloc_buf(8); memcpy(p, src, 100);")
+
+    result = SourceIntelResult(attributes=(AttributeEvidence(
+        kind=KIND_ALLOC_SIZE,
+        function_name="alloc_buf",
+        location=("test.c", 1),
+        match_source="literal",
+        raw_match="__attribute__((alloc_size(1)))",
+    ),))
+    with patch(
+        "packages.source_intel.adapter.analyze",
+        return_value=result,
+    ):
+        v = SourceIntelValidator(repo_root=tmp_path)
+        assert v.validate(finding) == ValidatorVerdict.EXPLOITABLE
+
+
+def test_returns_nonnull_function_in_snippet_returns_exploitable_for_null_deref(tmp_path):
+    """returns_nonnull on a function whose result is dereferenced
+    without a null check — annotation tells the LLM the caller trusted
+    the contract; if the function CAN return NULL erroneously, the
+    finding is exploitable."""
+    from packages.source_intel.analyze import (
+        KIND_RETURNS_NONNULL, AttributeEvidence,
+    )
+
+    (tmp_path / "test.c").write_text("void *must_succeed(void);\n")
+    finding = _finding(str(tmp_path / "test.c"),
+                       "cpp/null-dereference",
+                       "p = must_succeed(); p->field = 1;")
+
+    result = SourceIntelResult(attributes=(AttributeEvidence(
+        kind=KIND_RETURNS_NONNULL,
+        function_name="must_succeed",
+        location=("test.c", 1),
+        match_source="literal",
+        raw_match="__attribute__((returns_nonnull))",
+    ),))
+    with patch(
+        "packages.source_intel.adapter.analyze",
+        return_value=result,
+    ):
+        v = SourceIntelValidator(repo_root=tmp_path)
+        assert v.validate(finding) == ValidatorVerdict.EXPLOITABLE
+
+
+def test_alloc_size_evidence_irrelevant_for_null_deref(tmp_path):
+    """alloc_size relevance is unbounded-write / uncontrolled-* —
+    NOT null-deref. Even with a matching function, CWE-476 stays
+    UNCERTAIN."""
+    from packages.source_intel.analyze import KIND_ALLOC_SIZE, AttributeEvidence
+
+    (tmp_path / "test.c").write_text("void *alloc_buf(int sz);\n")
+    finding = _finding(str(tmp_path / "test.c"),
+                       "cpp/null-dereference",
+                       "p = alloc_buf(8); p->field = 1;")
+
+    result = SourceIntelResult(attributes=(AttributeEvidence(
+        kind=KIND_ALLOC_SIZE,
+        function_name="alloc_buf",
+        location=("test.c", 1),
+        match_source="literal",
+        raw_match="__attribute__((alloc_size(1)))",
+    ),))
+    with patch(
+        "packages.source_intel.adapter.analyze",
+        return_value=result,
+    ):
+        v = SourceIntelValidator(repo_root=tmp_path)
+        assert v.validate(finding) == ValidatorVerdict.UNCERTAIN
+
+
 def test_nonnull_evidence_irrelevant_for_use_after_free(tmp_path):
     """Nonnull does NOT speak to UAF — even with a perfect function
     match, the relevance check returns UNCERTAIN for CWE-416."""

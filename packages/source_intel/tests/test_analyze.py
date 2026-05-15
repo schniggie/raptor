@@ -258,6 +258,52 @@ def test_e2e_real_spatch_detects_literal_nonnull(tmp_path):
     not shutil.which("spatch"),
     reason="spatch not installed — skip real-spatch E2E",
 )
+def test_e2e_real_spatch_detects_literal_alloc_size(tmp_path):
+    """Both pointer-return and value-return alloc_size variants
+    detected, including the __alloc_size__ internal alias."""
+    src = tmp_path / "alloc_size_fixture.c"
+    src.write_text(
+        "__attribute__((alloc_size(1))) void *my_malloc(int sz);\n"
+        "__attribute__((alloc_size(1, 2))) void *my_calloc(int n, int sz);\n"
+        "__attribute__((__alloc_size__(1))) char *gimme(unsigned long n);\n"
+    )
+
+    r = analyze(tmp_path)
+    from packages.source_intel.analyze import KIND_ALLOC_SIZE
+    names = {ev.function_name for ev in r.attrs_of_kind(KIND_ALLOC_SIZE)
+             if ev.match_source == "literal"}
+    assert names == {"my_malloc", "my_calloc", "gimme"}, (
+        f"attr_alloc_size rule didn't fire on all three variants; "
+        f"got: {names!r}"
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("spatch"),
+    reason="spatch not installed — skip real-spatch E2E",
+)
+def test_e2e_real_spatch_detects_literal_returns_nonnull(tmp_path):
+    """Both literal and __returns_nonnull__ internal alias detected."""
+    src = tmp_path / "rn_fixture.c"
+    src.write_text(
+        "__attribute__((returns_nonnull)) void *must_succeed(void);\n"
+        "__attribute__((__returns_nonnull__)) char *strdup_or_die(const char *s);\n"
+    )
+
+    r = analyze(tmp_path)
+    from packages.source_intel.analyze import KIND_RETURNS_NONNULL
+    names = {ev.function_name for ev in r.attrs_of_kind(KIND_RETURNS_NONNULL)
+             if ev.match_source == "literal"}
+    assert names == {"must_succeed", "strdup_or_die"}, (
+        f"attr_returns_nonnull rule didn't fire on all forms; "
+        f"got: {names!r}"
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("spatch"),
+    reason="spatch not installed — skip real-spatch E2E",
+)
 def test_e2e_axis_dispatch_runs_multiple_rules(tmp_path):
     """When the target has both WUR and nonnull annotations, BOTH
     rules in the attrs/ axis fire — confirms the axis-dir iteration
