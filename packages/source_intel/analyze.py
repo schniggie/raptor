@@ -314,6 +314,12 @@ class SourceIntelResult:
         across the analyzed target. Used by axis-5 to assess whether
         an unchecked site is anomalous within the project's idiom.
 
+        Dedupes by (file, line) within each bucket — the same alloc
+        site may be matched by multiple shape-rules (e.g. both
+        ``unchecked_alloc`` field-shape AND ``unchecked_alloc_local``
+        when the LHS is a field expression). Without dedup the same
+        site is counted twice, skewing the ratio.
+
         Caveats:
           * Counts are scoped to the analyzed target subtree only —
             they don't see external callers.
@@ -321,13 +327,15 @@ class SourceIntelResult:
             cocci-OBSERVED sites, not the actual call count
             (cocci's pattern matching may miss aliased/macro forms).
         """
-        checked = sum(
-            1 for c in self.checked_allocations if c.allocator == allocator
-        )
-        unchecked = sum(
-            1 for a in self.allocations if a.allocator == allocator
-        )
-        return (checked, unchecked)
+        checked_sites = {
+            c.location for c in self.checked_allocations
+            if c.allocator == allocator
+        }
+        unchecked_sites = {
+            a.location for a in self.allocations
+            if a.allocator == allocator
+        }
+        return (len(checked_sites), len(unchecked_sites))
 
 
 # =====================================================================
