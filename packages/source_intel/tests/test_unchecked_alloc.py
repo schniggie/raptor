@@ -73,6 +73,39 @@ def test_e2e_unchecked_alloc_field_fires(tmp_path):
     not shutil.which("spatch"),
     reason="spatch not installed — skip real-spatch E2E",
 )
+@pytest.mark.skipif(
+    not shutil.which("spatch"),
+    reason="spatch not installed — skip real-spatch E2E",
+)
+def test_e2e_unchecked_alloc_local_fires_on_kstrdup(tmp_path):
+    """Axis-3b (Phase 6b): local-variable assignment of an allocator
+    return value with no NULL check — covers CVE-2019-12382 shape:
+    `local = kstrdup(...)` followed by use without check."""
+    src = tmp_path / "unchecked_local.c"
+    # Note: declaration-with-initializer (`char *p = alloc(...);`) is
+    # NOT matched by the current cocci pattern — spatch handles bare
+    # `expression = ...` assignments only, not declarators. CVE-2019-12382
+    # uses the bare-assignment shape, which is what we test here.
+    src.write_text(
+        "extern char *kstrdup(const char *s, int gfp);\n"
+        "extern int strsep(char **, const char *);\n"
+        "\n"
+        "int unchecked_local(const char *name, int gfp) {\n"
+        "    char *fwstr;\n"
+        "    fwstr = kstrdup(name, gfp);\n"
+        "    strsep(&fwstr, \",\");\n"
+        "    return 0;\n"
+        "}\n"
+    )
+    r = analyze(tmp_path)
+    locals_ = [a for a in r.allocations if a.shape == "local"]
+    assert locals_, (
+        f"expected at least one local-shape AllocationEvidence; got "
+        f"{[(a.allocator, a.shape) for a in r.allocations]!r}"
+    )
+    assert locals_[0].allocator == "kstrdup"
+
+
 def test_e2e_unchecked_alloc_skips_checked_case(tmp_path):
     """When the field IS NULL-checked after the alloc, the rule
     must NOT fire — `when !=` clauses correctly exclude checked

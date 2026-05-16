@@ -213,21 +213,26 @@ class SourceIntelValidator:
         finding: Finding,
         result: SourceIntelResult,
     ) -> ValidatorVerdict:
-        """Apply the verdict policy in three passes:
+        """Apply the verdict policy in four passes:
 
-        1. **Abort-dominance check (Phase 5a):** if an abort-class call
+        1. **Dead-code check (Phase 7):** if PR-4's function_inventory
+           reports the finding's enclosing function has zero callers
+           in the target AND it's static, the bug is unreachable —
+           return NOT_EXPLOITABLE with dead_code rationale.
+
+        2. **Abort-dominance check (Phase 5a):** if an abort-class call
            sits in the same function as the finding's sink AND the
            finding's rule_id is memory-corruption-class, the bug
            primitive aborts before exploitation — return
            NOT_EXPLOITABLE.
 
-        2. **Unchecked-allocation check (Phase 6a, axis 3):** if the
+        3. **Unchecked-allocation check (Phase 6a, axis 3):** if the
            finding's source line is at an allocator call site we
-           emitted as `unchecked_alloc_field` AND the rule_id is
+           emitted as `unchecked_alloc_*` AND the rule_id is
            null-deref-class, the structural unchecked-alloc evidence
            directly supports the finding — return EXPLOITABLE.
 
-        3. **Attribute-evidence check (Phase 3-3d):** EXPLOITABLE when
+        4. **Attribute-evidence check (Phase 3-3d):** EXPLOITABLE when
            an attribute observation references a function named in the
            finding's snippet AND the rule_id is kind-relevant.
 
@@ -235,6 +240,9 @@ class SourceIntelValidator:
         """
         if result.is_skipped:
             return ValidatorVerdict.UNCERTAIN
+
+        if _finding_in_dead_code(finding, self._repo_root):
+            return ValidatorVerdict.NOT_EXPLOITABLE
 
         if _abort_dominates_finding(finding, result):
             return ValidatorVerdict.NOT_EXPLOITABLE
@@ -277,6 +285,149 @@ _NULL_DEREF_RULE_PREFIXES: Tuple[str, ...] = (
     "cpp/null-dereference",
     "c/null-dereference",
 )
+
+
+def _finding_in_dead_code(finding: Finding, repo_root: Path) -> bool:
+    """Compose with PR-4's ``packages.coccinelle.prereqs.gather_prereqs``
+    to detect whether the finding's enclosing function is dead code
+    (static, defined but not called anywhere in the target).
+
+    Returns True iff:
+      * the finding's sink file is C/C++ source
+      * `_enclosing_function` resolves the sink to a function name F
+      * F is declared `static` (file-local linkage)
+      * PR-4 prereqs reports F as defined AND with zero callers
+
+    The `static` requirement is critical: a non-static function whose
+    callers happen to live in OTHER files (not in our target subset)
+    would otherwise be wrongly flagged as dead. The classic example
+    is a kernel driver entry-point function whose only caller is in
+    a different translation unit. `static` linkage means the function
+    is file-scoped — no callers in this file → genuinely unreachable.
+
+    Skips silently when PR-4 isn't available (minimal install).
+    """
+    try:
+        from packages.coccinelle.prereqs import gather_prereqs
+    except ImportError:
+        return False
+
+    sink_path = finding.sink.file_path or ""
+    sink_line = finding.sink.line or 0
+    if not sink_path or not sink_line:
+        return False
+
+    # Resolve to absolute for the function-bounds heuristic + cache
+    # comparison with PR-4 prereqs output.
+    sink_path_abs = sink_path
+    if not Path(sink_path).is_absolute():
+        sink_path_abs = str((repo_root / sink_path).resolve())
+
+    from packages.source_intel.analyze import _enclosing_function
+    finding_fn = _enclosing_function(sink_path_abs, sink_line)
+    if not finding_fn:
+        return False
+
+    if not _function_is_static(sink_path_abs, finding_fn):
+        return False
+
+    # Find the target directory (same heuristic as
+    # _target_for_finding — file's parent or build-marker directory).
+    target = Path(sink_path_abs).parent
+    if not target.is_dir():
+        return False
+
+    facts = gather_prereqs(target)
+    if facts.is_skipped:
+        return False
+    # Function must be defined AND have zero callers in the target.
+    if not facts.function_exists(finding_fn):
+        return False
+    if facts.function_has_callers(finding_fn):
+        return False
+    # Final guard: PR-4's function_inventory.cocci only tracks direct
+    # `funcname(args)` invocations. It misses function-pointer uses
+    # (kernel struct ops vtables: `.mgmt_tx = brcmf_cfg80211_mgmt_tx,`,
+    # callback registration: `register_handler(my_handler);`,
+    # array-of-callbacks). A static function referenced as a pointer
+    # IS reachable — skip the dead-code verdict.
+    if _function_referenced_as_pointer(target, finding_fn):
+        return False
+    return True
+
+
+def _function_referenced_as_pointer(
+    target: Path, function_name: str
+) -> bool:
+    """Best-effort: scan ``target`` (file or dir) for non-call uses of
+    ``function_name``. Returns True if the name appears in a context
+    consistent with function-pointer use (vtable assignment, callback
+    registration, address-of, array element).
+
+    Patterns:
+      * ``.field = funcname[,;}]``       — struct vtable assignment
+      * ``= funcname[,;}]``              — bare initializer
+      * ``& funcname\\b``                 — address-of
+      * ``( funcname [,)]``              — passed as argument
+      * ``\\bfuncname [,;]``              — array element / list
+
+    Conservative file traversal: limited to ``.c`` / ``.h`` / ``.cc``
+    / ``.cpp`` / ``.hpp`` to bound cost on noisy targets.
+    """
+    import re as _re
+    fn = _re.escape(function_name)
+    # Single regex covering the common pointer-use shapes. Each
+    # alternative requires ``function_name`` is NOT followed by ``(``
+    # — otherwise it is just a normal call PR-4 would have caught.
+    pat = _re.compile(
+        r"(?:[.=&,(]\s*" + fn + r"|^\s*" + fn + r")"
+        r"(?!\s*\()"  # NOT a call
+        r"(?:\s*[,;)}]|\s*$|\s+\w)",
+        _re.MULTILINE,
+    )
+    EXTS = {".c", ".h", ".cc", ".cpp", ".hpp", ".cxx", ".hxx"}
+    if target.is_file():
+        files = [target]
+    else:
+        files = [p for p in target.rglob("*") if p.suffix in EXTS]
+    for path in files:
+        try:
+            with open(path, "r", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        # Strip the function's own definition line so we don't
+        # match it as a self-reference. Cheap heuristic: skip lines
+        # containing both the name AND `(` AND `{` on same line, OR
+        # a trailing `(` (signature line). Better: filter in pattern
+        # via the `(?!\s*\()` negative lookahead — already done.
+        if pat.search(text):
+            return True
+    return False
+
+
+def _function_is_static(file_path: str, function_name: str) -> bool:
+    """Best-effort: scan ``file_path`` for a line beginning with
+    ``static`` and containing ``function_name(``.
+
+    Conservative: returns False when uncertain. Static-detection
+    failure ALWAYS keeps a non-static function from being marked
+    dead, which is the safe direction (avoids false positives on
+    cross-TU-callable functions).
+    """
+    try:
+        with open(file_path, "r", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return False
+    # Match `static [optional return-type tokens] funcname(`
+    import re as _re
+    pat = _re.compile(
+        r"^\s*static\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+|\*\s*)*"
+        + _re.escape(function_name) + r"\s*\(",
+        _re.MULTILINE,
+    )
+    return bool(pat.search(text))
 
 
 def _unchecked_alloc_supports_finding(

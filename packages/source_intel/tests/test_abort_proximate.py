@@ -180,11 +180,16 @@ def test_abort_dominates_emits_not_exploitable(tmp_path):
 
 def test_abort_in_different_function_does_not_dominate(tmp_path):
     """Same-file abort but in a DIFFERENT function — must NOT
-    trigger NOT_EXPLOITABLE."""
+    trigger NOT_EXPLOITABLE.
+
+    Note: the fixture includes a caller of `f` so the dead-code
+    verdict pass doesn't fire — we're isolating the abort-dominance
+    behaviour."""
     src = tmp_path / "test.c"
     src.write_text(
         "void other(int *q){BUG_ON(!q);}\n"
         "void f(int *p){*p=1;}\n"
+        "int main(void){int x; f(&x); return 0;}\n"
     )
 
     finding = _finding(str(src), "cpp/null-dereference",
@@ -209,7 +214,10 @@ def test_abort_dominance_skipped_for_injection_cwe(tmp_path):
     abort-class signal — exploitation primitive doesn't depend on
     process continuation. NOT_EXPLOITABLE must NOT fire."""
     src = tmp_path / "test.c"
-    src.write_text("void f(int *p){BUG_ON(!p);*p=1;}\n")
+    src.write_text(
+        "void f(int *p){BUG_ON(!p);*p=1;}\n"
+        "int main(void){int x; f(&x); return 0;}\n"
+    )
 
     finding = _finding(str(src), "cpp/command-line-injection",
                        sink_line=1)

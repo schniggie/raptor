@@ -467,26 +467,37 @@ _KIND_TO_RAW_MATCH: Dict[str, str] = {
 
 
 def _parse_match_to_allocation(match: Any) -> List[AllocationEvidence]:
-    """Convert a cocci :class:`SpatchMatch` from unchecked_alloc.cocci
+    """Convert a cocci :class:`SpatchMatch` from an allocation rule
     into an :class:`AllocationEvidence` record.
 
-    Cocci emits ``unchecked_alloc_field:<allocator>:<field>``. The
-    enclosing-function lookup uses the same regex-based heuristic
+    Cocci emits one of:
+      * ``unchecked_alloc_field:<allocator>:<field>`` — field shape
+      * ``unchecked_alloc_local:<allocator>`` — local-var shape
+
+    The enclosing-function lookup uses the same regex-based heuristic
     as abort parsing.
     """
     msg = (getattr(match, "message", "") or "").strip()
-    if not msg.startswith("unchecked_alloc_field:"):
-        return []
-    payload = msg[len("unchecked_alloc_field:"):].strip()
-    if ":" not in payload:
-        return []
-    allocator, _, field = payload.partition(":")
-    allocator = allocator.strip()
-    field = field.strip()
-    if not allocator:
-        return []
     file_path = getattr(match, "file", "")
     line_no = int(getattr(match, "line", 0))
+
+    shape: Optional[str] = None
+    allocator = ""
+    target_field: Optional[str] = None
+
+    if msg.startswith("unchecked_alloc_field:"):
+        payload = msg[len("unchecked_alloc_field:"):].strip()
+        if ":" in payload:
+            allocator, _, target_field = payload.partition(":")
+            allocator = allocator.strip()
+            target_field = target_field.strip() or None
+            shape = "field"
+    elif msg.startswith("unchecked_alloc_local:"):
+        allocator = msg[len("unchecked_alloc_local:"):].strip()
+        shape = "local"
+
+    if shape is None or not allocator:
+        return []
 
     enclosing_fn = _enclosing_function(file_path, line_no) if file_path else None
 
@@ -499,8 +510,8 @@ def _parse_match_to_allocation(match: Any) -> List[AllocationEvidence]:
     return [AllocationEvidence(
         allocator=allocator,
         location=(file_path, line_no),
-        shape="field",
-        target_field=field or None,
+        shape=shape,
+        target_field=target_field,
         enclosing_function=enclosing_fn,
         conditional_on=cond,
     )]

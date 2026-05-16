@@ -337,11 +337,22 @@ def run_rules(
 
 
 def _dedup_matches(matches: List[SpatchMatch]) -> List[SpatchMatch]:
-    """Remove duplicate matches (same file+line+col+rule), preserving order."""
+    """Remove duplicate matches (same file+line+col+rule+message),
+    preserving order.
+
+    The ``message`` field MUST be part of the key. Multi-rule cocci
+    files (PR-4 function_inventory, source_intel multi-message rules)
+    legitimately emit multiple distinct messages at the same
+    (file, line) — for example ``def:foo`` and ``call:bar`` both
+    landing at line 1 of a one-line function definition that also
+    contains a call. Dropping `message` from the key would silently
+    coalesce these into a single match, losing the per-message
+    information.
+    """
     seen: set = set()
     result = []
     for m in matches:
-        key = (m.file, m.line, m.column, m.rule)
+        key = (m.file, m.line, m.column, m.rule, m.message)
         if key not in seen:
             seen.add(key)
             result.append(m)
