@@ -79,7 +79,11 @@ SCA_ALLOWED_HOSTS = (
 )
 
 
-def default_client(target: Optional["Path"] = None) -> HttpClient:
+def default_client(
+    target: Optional["Path"] = None,
+    *,
+    offline: bool = False,
+) -> HttpClient:
     """Return the default HttpClient for /sca.
 
     Always routes through the in-process egress proxy at
@@ -98,13 +102,68 @@ def default_client(target: Optional["Path"] = None) -> HttpClient:
     EPSS / static-registry-metadata hosts — not container registries
     which are project-specific.
 
+    ``offline=True`` returns a :class:`_NoopHttpClient` whose every
+    method raises :class:`HttpError`. This is the universal gate for
+    the SCA scan path: direct ``http.get_json(url)`` calls (in
+    license enrichment, registry-metadata walks, etc.) that bypass
+    the Client-class layer's per-client offline flag are now
+    refused at the http layer. Callers' existing try/except
+    HttpError paths handle the no-op response.
+
+    The egress proxy itself is shared across raptor subsystems (codeql,
+    cve_diff, etc.) and stays up regardless of SCA's offline state.
+    The proxy is fine without clients; this knob only neuters this
+    one HttpClient instance.
+
     Tests bypass this seam by injecting an HttpClient directly via
     dependency injection (``run_sca(..., http=StubHttp(...))``); they
     never trigger proxy startup.
     """
+    if offline:
+        return _NoopHttpClient()
     hosts = compose_proxy_hosts(target) if target is not None \
         else list(SCA_ALLOWED_HOSTS)
     return EgressClient(tuple(hosts), user_agent=SCA_USER_AGENT)
+
+
+class _NoopHttpClient:
+    """HttpClient impl that refuses every request.
+
+    Returned by :func:`default_client` when ``offline=True``. Every
+    method raises :class:`core.http.HttpError` so the existing
+    try/except HttpError fall-through paths in callers (license
+    enrichment, typosquat walker, calibration corpus builder) take
+    the "couldn't fetch, skip" branch instead of leaking through
+    to live network.
+
+    Cached entries are NOT served by this class — callers that
+    want to use cached data must keep the client-class layer
+    (PyPIClient, NpmClient, etc.) which has its own cache-only
+    short-circuit. The cache layer sits ABOVE this class.
+    """
+    _OFFLINE_MSG = (
+        "sca.default_client(offline=True): network call refused"
+    )
+
+    def request(self, method, url, **kw):
+        from core.http import HttpError
+        raise HttpError(f"{self._OFFLINE_MSG}: {method} {url}")
+
+    def post_json(self, url, body, *a, **kw):
+        from core.http import HttpError
+        raise HttpError(f"{self._OFFLINE_MSG}: POST {url}")
+
+    def get_json(self, url, *a, **kw):
+        from core.http import HttpError
+        raise HttpError(f"{self._OFFLINE_MSG}: GET {url}")
+
+    def get_bytes(self, url, *a, **kw):
+        from core.http import HttpError
+        raise HttpError(f"{self._OFFLINE_MSG}: GET {url}")
+
+    def stream_bytes(self, url, **kw):
+        from core.http import HttpError
+        raise HttpError(f"{self._OFFLINE_MSG}: STREAM {url}")
 
 
 def compose_proxy_hosts(target: "Optional[Path]" = None) -> list:

@@ -441,6 +441,7 @@ def enrich_licenses(
     http: Optional[Any] = None,
     cache: Optional[Any] = None,
     enabled: bool = True,
+    offline: bool = False,
 ) -> int:
     """Populate ``Dependency.declared_license`` for deps where it's
     None by querying registry metadata. Returns the number of deps
@@ -453,6 +454,12 @@ def enrich_licenses(
     When ``http`` is None, returns 0 — license enrichment is
     network-dependent and tests that don't supply an http stub
     skip the network.
+
+    ``offline=True`` is honoured by the underlying registry clients:
+    cached entries still resolve, but cache misses return None
+    rather than falling through to live PyPI / npm. Surfaced as
+    a Tier-6 E2E leak pre-fix — every caller in pipeline /
+    bumper / harden plumbs ``offline=options.offline`` here.
     """
     if not enabled or http is None:
         return 0
@@ -466,8 +473,8 @@ def enrich_licenses(
     # Pre-construct the per-ecosystem registry clients so all worker
     # threads share one set (no double-construction races; the
     # clients are stateless wrappers around http+cache).
-    pypi = PyPIClient(http=http, cache=cache)
-    npm = NpmClient(http=http, cache=cache)
+    pypi = PyPIClient(http=http, cache=cache, offline=offline)
+    npm = NpmClient(http=http, cache=cache, offline=offline)
 
     work = [d for d in deps if not d.declared_license]
     if not work:

@@ -98,20 +98,6 @@ def _build_simple_fixture(repo: Path) -> None:
 import pytest
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Tier-6 surfaced a real offline-mode leak: some code path "
-        "(intermittent — likely cache-warming dependent) calls "
-        "socket.connect to non-loopback addresses despite --offline. "
-        "The egress proxy logs 'tunnel handler unhandled exception' "
-        "to confirm. Investigation needed: walk every client "
-        "construction site in pipeline.py and verify each takes "
-        "offline=options.offline. ``strict=False`` because the "
-        "leak is intermittent — passes mean cache was warm enough "
-        "to skip the leaking path, not that the leak is fixed."
-    ),
-)
 def test_offline_scan_makes_no_network_connections(tmp_path: Path) -> None:
     """``raptor-sca <target> --offline`` must complete without
     any ``socket.connect`` to a non-loopback address.
@@ -180,14 +166,6 @@ def test_offline_review_subcommand_blocks_network(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Same offline-mode leak as test_offline_scan_makes_no_network_connections "
-        "— an explicit empty cache root surfaces it more reliably (the empty cache "
-        "forces every client to try its network path before falling through)."
-    ),
-)
 def test_offline_with_explicit_cache_root(tmp_path: Path) -> None:
     """Passing an explicit empty cache root → offline mode still
     works (no fall-through to live network when cache is cold)."""

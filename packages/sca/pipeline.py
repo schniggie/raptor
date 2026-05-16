@@ -225,7 +225,7 @@ def run_sca(
         # allowlist with Dockerfile-derived container-registry
         # hosts (B9 base-image scanning needs e.g. docker.io,
         # ghcr.io which aren't in the static SCA_ALLOWED_HOSTS).
-        http = default_client(target=target)
+        http = default_client(target=target, offline=options.offline)
 
     # Apply --no-cache by zeroing TTLs at every client level. This
     # avoids special-casing every caller; a TTL of 0 forces a refetch
@@ -320,7 +320,18 @@ def run_sca(
     #     into raw_deps before join so they get OSV-queried alongside
     #     direct deps.
     transitive_statuses: List = []
-    if options.enable_transitive_expansion or options.fallback_registry_metadata:
+    if (options.enable_transitive_expansion
+            or options.fallback_registry_metadata) and not options.offline:
+        # Cascade expansion spawns sandbox subprocesses running
+        # ``npm install --dry-run`` / ``pip-compile`` — those reach
+        # registries over the network even when the SCA scan was
+        # asked to be offline. The HttpClient-level offline gate
+        # doesn't reach into a child process. Skip the whole
+        # stage when ``--offline`` is set; the run reports only
+        # deps from manifests + lockfiles already on disk.
+        # (Surfaced by Tier-6 E2E: ``socket.connect`` interceptor
+        # caught registry.npmjs.org / pypi.org despite ``--offline``;
+        # this stage was the source.)
         progress.stage("cascade")
         from .transitive import expand_missing_transitives
         new_transitives, transitive_statuses = expand_missing_transitives(
@@ -492,7 +503,10 @@ def run_sca(
         # offline (cache may still populate via prior runs).
         if not options.offline:
             try:
-                enriched = enrich_licenses(joined, http=http, cache=cache)
+                enriched = enrich_licenses(
+                    joined, http=http, cache=cache,
+                    offline=options.offline,
+                )
                 if enriched:
                     logger.info(
                         "sca.pipeline: license enrichment populated %d dep(s)",
@@ -981,9 +995,18 @@ def _run_maintainer_review(client, supply_chain_findings, canonical, http, optio
     from core.json import JsonCache
     from . import SCA_CACHE_ROOT
 
-    cache = JsonCache(root=SCA_CACHE_ROOT)
-    pypi = PyPIClient(http, cache)
-    npm = NpmClient(http, cache)
+    # ``options.offline`` propagates to every client so the
+    # maintainer-review path stops at the cache without falling
+    # through to live PyPI / npm requests. Pre-fix this site was
+    # the largest --offline leak surfaced by Tier-6 E2E.
+    # ``cache_root`` also honoured so the operator's ``--cache-root``
+    # override reaches this path (was previously hardcoded to
+    # ``SCA_CACHE_ROOT``).
+    cache = JsonCache(
+        root=options.cache_root or SCA_CACHE_ROOT,
+    )
+    pypi = PyPIClient(http, cache, offline=options.offline)
+    npm = NpmClient(http, cache, offline=options.offline)
 
     for dep in deps_to_review[:20]:
         meta = {}
