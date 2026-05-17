@@ -1483,3 +1483,188 @@ def test_upstream_lookup_dedups_across_dockerfiles(tmp_path: Path) -> None:
         if "api.github.com" in c
     ]
     assert len(gh_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Binary-capability-delta wiring
+# ---------------------------------------------------------------------------
+
+
+class TestBinaryCapabilityDeltaWiring:
+    """The 5th-Tier-1 signal is opt-in via policy. When enabled
+    AND the candidate is image-shaped, the orchestrator extracts
+    current + target binaries and runs the capability diff. These
+    tests stub the extractor + detector rather than running
+    radare2 — the orchestrator wiring is what's under test."""
+
+    def test_disabled_by_default_no_extractor_call(
+        self, tmp_path, monkeypatch,
+    ):
+        """Default policy = off. Even with a from_image candidate,
+        the extractor should NEVER be invoked."""
+        from packages.sca.bump import orchestrator as orch_mod
+
+        calls = {"fetch": 0, "detect": 0}
+        monkeypatch.setattr(
+            "packages.sca.bump.image_binary_extract.fetch_image_binary",
+            lambda *a, **k: (calls.__setitem__(
+                "fetch", calls["fetch"] + 1) or None),
+        )
+        monkeypatch.setattr(
+            "packages.sca.bump.binary_capability_delta."
+            "binary_capability_delta_finding",
+            lambda *a, **k: (calls.__setitem__(
+                "detect", calls["detect"] + 1) or None),
+        )
+
+        cand = orch_mod.BumpCandidate(
+            kind="from_image",
+            locator="docker.io/library/alpine",
+            file=tmp_path / "Dockerfile",
+            current_version="3.18", target_version="3.19",
+        )
+        result = orch_mod._evaluate_one(
+            cand, pypi_client=None, npm_client=None,
+            now=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            oci_client=object(),
+            binary_capability_delta_enabled=False,
+        )
+        assert calls["fetch"] == 0
+        assert calls["detect"] == 0
+        assert result.bump_supply_chain_findings == []
+
+    def test_enabled_from_image_triggers_extractor(
+        self, tmp_path, monkeypatch,
+    ):
+        """Policy on + from_image candidate → extractor called
+        twice (current + target), detector called once."""
+        from packages.sca.bump import orchestrator as orch_mod
+
+        from packages.sca.models import (
+            Confidence, Dependency, PinStyle, SupplyChainFinding,
+        )
+
+        fetched = []
+
+        def fake_fetch(ref, *, client, **kwargs):
+            fetched.append(ref)
+            return tmp_path / f"binary-{ref.replace('/', '_')}"
+
+        sentinel_dep = Dependency(
+            ecosystem="Container",
+            name="docker.io/library/alpine",
+            version="3.19",
+            declared_in=Path("/<bump>"),
+            scope="main", is_lockfile=False,
+            pin_style=PinStyle.EXACT, direct=True,
+            purl="pkg:container/docker.io/library/alpine@3.19",
+            parser_confidence=Confidence("high", reason="test"),
+        )
+        sentinel = SupplyChainFinding(
+            finding_id="sca:bump:binary_capability_delta:test",
+            kind="binary_capability_delta", dependency=sentinel_dep,
+            detail="test", evidence={}, severity="high",
+            confidence=Confidence("medium", reason="test"),
+        )
+
+        detect_calls = []
+
+        def fake_finding(**kwargs):
+            detect_calls.append(kwargs)
+            return sentinel
+
+        monkeypatch.setattr(
+            "packages.sca.bump.image_binary_extract.fetch_image_binary",
+            fake_fetch,
+        )
+        monkeypatch.setattr(
+            "packages.sca.bump.binary_capability_delta."
+            "binary_capability_delta_finding",
+            fake_finding,
+        )
+
+        cand = orch_mod.BumpCandidate(
+            kind="from_image",
+            locator="docker.io/library/alpine",
+            file=tmp_path / "Dockerfile",
+            current_version="3.18", target_version="3.19",
+        )
+        result = orch_mod._evaluate_one(
+            cand, pypi_client=None, npm_client=None,
+            now=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            oci_client=object(),
+            binary_capability_delta_enabled=True,
+        )
+        assert fetched == [
+            "docker.io/library/alpine:3.18",
+            "docker.io/library/alpine:3.19",
+        ]
+        assert len(detect_calls) == 1
+        assert any(
+            f.kind == "binary_capability_delta"
+            for f in result.bump_supply_chain_findings
+        )
+
+    def test_enabled_arg_kind_not_triggered(self, tmp_path, monkeypatch):
+        """``arg`` kind is source-pinned (semgrep ARG, etc.) — not
+        image-shaped. Even with policy on, the binary detector
+        does NOT fire."""
+        from packages.sca.bump import orchestrator as orch_mod
+
+        calls = {"fetch": 0}
+        monkeypatch.setattr(
+            "packages.sca.bump.image_binary_extract.fetch_image_binary",
+            lambda *a, **k: (calls.__setitem__(
+                "fetch", calls["fetch"] + 1) or None),
+        )
+
+        cand = orch_mod.BumpCandidate(
+            kind="arg", locator="UNKNOWN_ARG",
+            file=tmp_path / "Dockerfile",
+            current_version="1.0", target_version="2.0",
+        )
+        orch_mod._evaluate_one(
+            cand, pypi_client=None, npm_client=None,
+            now=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            oci_client=object(),
+            binary_capability_delta_enabled=True,
+        )
+        assert calls["fetch"] == 0
+
+    def test_current_binary_extraction_failure_no_finding(
+        self, tmp_path, monkeypatch,
+    ):
+        """Extractor returns None for current → bail before
+        fetching target or calling detector. No finding."""
+        from packages.sca.bump import orchestrator as orch_mod
+
+        calls = {"fetched": 0, "detect": 0}
+        monkeypatch.setattr(
+            "packages.sca.bump.image_binary_extract.fetch_image_binary",
+            lambda *a, **k: (calls.__setitem__(
+                "fetched", calls["fetched"] + 1) or None),
+        )
+        monkeypatch.setattr(
+            "packages.sca.bump.binary_capability_delta."
+            "binary_capability_delta_finding",
+            lambda *a, **k: (calls.__setitem__(
+                "detect", calls["detect"] + 1) or None),
+        )
+
+        cand = orch_mod.BumpCandidate(
+            kind="from_image",
+            locator="docker.io/library/missing",
+            file=tmp_path / "Dockerfile",
+            current_version="1", target_version="2",
+        )
+        result = orch_mod._evaluate_one(
+            cand, pypi_client=None, npm_client=None,
+            now=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            oci_client=object(),
+            binary_capability_delta_enabled=True,
+        )
+        # Current fetch attempted (returned None) → bail before
+        # target fetch or detector.
+        assert calls["fetched"] == 1
+        assert calls["detect"] == 0
+        assert result.bump_supply_chain_findings == []

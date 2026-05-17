@@ -79,6 +79,13 @@ class BumpPolicy:
 
     skip: List[SkipRule] = field(default_factory=list)
     thresholds: Thresholds = field(default_factory=Thresholds)
+    # OFF by default: binary-capability-delta requires radare2 +
+    # r2pipe + network egress to pull layers + significant compute.
+    # Operators opt in via ``binary_capability_delta: true`` in
+    # ``.raptor-sca-bump.yml`` (or the corresponding CLI flag). When
+    # enabled, FROM-image / yaml-image candidates get an extra signal
+    # comparing current vs target binary capability surfaces.
+    binary_capability_delta_enabled: bool = False
 
     def is_skipped(
         self, *, kind: str, locator: str,
@@ -170,7 +177,15 @@ def load_policy(target: Path) -> BumpPolicy:
                 block_on_major=bom,
             )
 
-    return BumpPolicy(skip=skips, thresholds=th)
+    # ``binary_capability_delta`` is the top-level toggle name in
+    # the YAML — keeping the YAML key short while the field name
+    # stays explicit. False / missing yields the default (off).
+    bcd_enabled = data.get("binary_capability_delta") is True
+
+    return BumpPolicy(
+        skip=skips, thresholds=th,
+        binary_capability_delta_enabled=bcd_enabled,
+    )
 
 
 def _locator_match(pattern: str, locator: str) -> bool:

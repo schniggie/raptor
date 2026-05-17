@@ -270,3 +270,35 @@ thresholds:
     })
     report = run_bump(tmp_path, http=http, pypi_client=pypi)
     assert report.results[0].verdict == _VERDICT_BLOCK
+
+
+def test_load_binary_capability_delta_default_off(tmp_path: Path) -> None:
+    """Missing key → ``binary_capability_delta_enabled = False``."""
+    from packages.sca.bump.policy import load_policy
+    (tmp_path / ".raptor-sca-bump.yml").write_text("skip: []\n")
+    policy = load_policy(tmp_path)
+    assert policy.binary_capability_delta_enabled is False
+
+
+def test_load_binary_capability_delta_enabled(tmp_path: Path) -> None:
+    """``binary_capability_delta: true`` → flag set to True."""
+    from packages.sca.bump.policy import load_policy
+    (tmp_path / ".raptor-sca-bump.yml").write_text(
+        "binary_capability_delta: true\n",
+    )
+    policy = load_policy(tmp_path)
+    assert policy.binary_capability_delta_enabled is True
+
+
+def test_load_binary_capability_delta_truthy_non_bool_stays_off(
+    tmp_path: Path,
+) -> None:
+    """Non-bool truthy values (``"yes"``, ``1``) don't enable the
+    flag — explicit ``true`` required. Defends against accidental
+    enables from sloppy YAML."""
+    from packages.sca.bump.policy import load_policy
+    (tmp_path / ".raptor-sca-bump.yml").write_text(
+        "binary_capability_delta: \"yes\"\n",
+    )
+    policy = load_policy(tmp_path)
+    assert policy.binary_capability_delta_enabled is False

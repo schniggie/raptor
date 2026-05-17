@@ -181,6 +181,24 @@ def run_bump(
     from packages.sca.platform_matrix import discover_platform_matrix
     platform_matrix = discover_platform_matrix(target)
 
+    # Lazy-construct the OCI client only when binary-capability-delta
+    # is enabled by policy AND at least one candidate is image-shaped.
+    # Building it eagerly would force the http dependency on operators
+    # who never enable the feature.
+    oci_client = None
+    if policy.binary_capability_delta_enabled and any(
+        c.kind in ("from_image", "yaml_image") for c in candidates
+    ):
+        try:
+            from core.oci.client import OciRegistryClient
+            oci_client = OciRegistryClient(http=http)
+        except Exception as e:                    # noqa: BLE001
+            logger.warning(
+                "sca.bump: binary_capability_delta enabled but OCI "
+                "client construction failed: %s — feature degraded",
+                e,
+            )
+
     results: List[BumpResult] = []
     for cand in candidates:
         result = _evaluate_one(
@@ -191,6 +209,10 @@ def run_bump(
             platform_matrix=platform_matrix,
             now=now,
             rapid_release_days=policy.thresholds.rapid_release_days,
+            oci_client=oci_client,
+            binary_capability_delta_enabled=(
+                policy.binary_capability_delta_enabled
+            ),
         )
         # Policy override: ``block_on_major`` forces major-version
         # bumps to Block-tier so operators always review them.
@@ -634,6 +656,8 @@ def _evaluate_one(
     platform_matrix=None,
     now: datetime,
     rapid_release_days: int = 30,
+    oci_client=None,
+    binary_capability_delta_enabled: bool = False,
 ) -> BumpResult:
     """Compute the verdict for one bump candidate.
 
@@ -699,6 +723,19 @@ def _evaluate_one(
                     "sca.bump: vuln-delta evaluation failed for %s: %s",
                     cand.locator, e,
                 )
+    # Binary-capability-delta — opt-in fifth Tier-1 signal. Applies
+    # to image-shaped candidates (FROM image, yaml image). Pulls
+    # current + target main binaries via core.oci, runs the
+    # capability diff; high-severity finding when target adds exec
+    # or network capability that current didn't have.
+    if (binary_capability_delta_enabled and oci_client is not None
+            and cand.kind in ("from_image", "yaml_image")):
+        bcd_finding = _binary_capability_delta_for_candidate(
+            cand, oci_client=oci_client,
+        )
+        if bcd_finding is not None:
+            findings.append(bcd_finding)
+
     from ..review import _compute_verdict
     verdict = _compute_verdict(
         vuln_findings=new_vulns,
@@ -711,6 +748,53 @@ def _evaluate_one(
         verdict_label=_VERDICT_LABEL.get(verdict, str(verdict)),
         bump_supply_chain_findings=findings,
         bump_vuln_findings=new_vulns,
+    )
+
+
+def _binary_capability_delta_for_candidate(
+    cand: BumpCandidate, *, oci_client,
+) -> Optional[SupplyChainFinding]:
+    """Pull current + target main binaries from the candidate's
+    image refs, run capability diff. Returns ``None`` on any
+    routine failure (image unresolvable, binary not extractable,
+    radare2 unavailable, no new capabilities).
+
+    For ``from_image`` candidates: locator is
+    ``"<registry>/<repository>"``; ref is ``"<locator>:<version>"``.
+
+    For ``yaml_image`` candidates: same shape (the yaml-image
+    enumerator builds locators in the same form).
+    """
+    from .binary_capability_delta import binary_capability_delta_finding
+    from .image_binary_extract import fetch_image_binary
+
+    current_ref = f"{cand.locator}:{cand.current_version}"
+    target_ref = f"{cand.locator}:{cand.target_version}"
+    current_bin = fetch_image_binary(
+        current_ref, client=oci_client,
+    )
+    if current_bin is None:
+        logger.debug(
+            "sca.bump.binary_capability_delta: could not extract "
+            "current binary from %s", current_ref,
+        )
+        return None
+    target_bin = fetch_image_binary(
+        target_ref, client=oci_client,
+    )
+    if target_bin is None:
+        logger.debug(
+            "sca.bump.binary_capability_delta: could not extract "
+            "target binary from %s", target_ref,
+        )
+        return None
+    return binary_capability_delta_finding(
+        ecosystem="Container",
+        name=cand.locator,
+        current_version=cand.current_version,
+        target_version=cand.target_version,
+        current_binary=current_bin,
+        target_binary=target_bin,
     )
 
 
