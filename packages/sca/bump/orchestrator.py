@@ -564,7 +564,9 @@ def _enumerate_from_image_candidates(
     """
     from core.dockerfile.parser import parse_dockerfile
     from core.oci.image_ref import parse_image_ref
-    from core.upstream_latest._version_filter import parse_stable
+    from core.upstream_latest._version_filter import (
+        parse_stable, parse_stable_with_variant,
+    )
     from core.upstream_latest.github_releases import (
         NoStableVersionsFound,
         UpstreamLookupError,
@@ -612,19 +614,30 @@ def _enumerate_from_image_candidates(
         if not ref.tag:
             continue
         # Tag must be clean stable semver to be bumpable. Variants
-        # (``3.12-bookworm``) and aliases (``latest``) are silently
-        # skipped — we don't have a variant-tag map that says
-        # ``3.12-bookworm`` and ``3.13-bookworm`` are equivalent.
-        if parse_stable(ref.tag) is None:
+        # Tags fall into one of three shapes:
+        #   * bare stable semver — ``3.12`` → bump to highest
+        #     bare semver tag for the repo.
+        #   * variant-suffixed semver — ``3.12-slim`` /
+        #     ``3.12-slim-bookworm`` → bump to highest
+        #     ``<semver>-<same-variant>`` tag (filter on the
+        #     variant string, preserve it through the lookup).
+        #   * anything else — aliases (``latest``), date tags,
+        #     branch refs — skip with no proposal.
+        parsed = parse_stable_with_variant(ref.tag)
+        if parsed is None:
             continue
+        _, variant = parsed
         locator = f"{ref.registry}/{ref.repository}"
-        cache_key = ("oci_tag", locator)
+        # Cache key includes the variant so different-variant
+        # callsites against the same repo don't share answers.
+        cache_key = ("oci_tag", locator, variant)
         if cache_key in from_cache:
             target_tag = from_cache[cache_key]
         else:
             try:
                 target_tag = oci_latest_tag(
                     image_ref_str, http=http, cache=cache,
+                    variant=variant,
                 )
             except (UpstreamLookupError, NoStableVersionsFound) as e:
                 skipped.append((

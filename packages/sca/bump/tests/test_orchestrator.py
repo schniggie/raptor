@@ -353,22 +353,46 @@ def test_from_image_with_clean_semver_tag_becomes_candidate(
     assert matching_result.verdict == _VERDICT_CLEAN
 
 
-def test_from_image_variant_tag_silently_skipped(tmp_path: Path) -> None:
-    """``FROM python:3.12-bookworm`` — variant tag, not a clean
-    semver. The walker skips silently (no bump-tier signal we
-    can apply to a variant choice). Not in candidates, not in
-    skipped."""
+def test_from_image_variant_tag_now_bumpable(tmp_path: Path) -> None:
+    """``FROM python:3.12-bookworm`` — variant-suffixed semver.
+    Pre-variant-support behaviour was silent skip; today the
+    walker treats it as a first-class candidate and asks the
+    registry for the highest ``<semver>-bookworm`` tag.
+
+    With an empty-tag stub (no tags returned from the registry),
+    the lookup raises NoStableVersionsFound and the tag lands in
+    ``skipped`` with an explicit reason — not silently dropped.
+    That's the load-bearing behaviour change: an operator sees
+    "couldn't bump because no bookworm tags found", not nothing.
+    """
     (tmp_path / "Dockerfile").write_text(
         "FROM python:3.12-bookworm\n"
     )
-    http = _StubHttp({})
+    # Stub: registry returns empty tag list. The bumper queries
+    # the variant ``bookworm`` against this, finds nothing, and
+    # surfaces the skip with an explicit "no stable-semver tags"
+    # reason. The /v2/library/python/tags/list URL is what
+    # OciRegistryClient.list_tags hits.
+    http = _StubHttp({
+        "https://registry-1.docker.io/v2/library/python/tags/list?n=100": {
+            "tags": [],
+        },
+    })
     report = run_bump(tmp_path, http=http)
     assert [c for c in report.candidates
              if c.kind == "from_image"] == []
-    # Not in skipped either — silent skip because we don't have
-    # an upstream-latest path for variant tags.
-    assert all(s[0] != "docker.io/library/python"
-                for s in report.skipped)
+    # Now appears in skipped with an explanatory message —
+    # operator-visible rather than silent.
+    matching_skipped = [
+        s for s in report.skipped
+        if s[0] == "docker.io/library/python"
+    ]
+    assert len(matching_skipped) == 1, (
+        f"expected one skipped entry for python:3.12-bookworm, "
+        f"got {report.skipped!r}"
+    )
+    _, _, reason = matching_skipped[0]
+    assert "OCI tag lookup failed" in reason
 
 
 def test_from_image_digest_pinned_silently_skipped(tmp_path: Path) -> None:
