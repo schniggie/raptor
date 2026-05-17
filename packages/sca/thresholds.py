@@ -34,13 +34,17 @@ class ThresholdConfig:
     fail_on_supply_chain: Optional[str] = None
     fail_on_hygiene: Optional[str] = None
     include_suppressed: bool = False
+    fail_on_capability_drift: bool = False
+    max_added_capability_buckets: Optional[int] = None
 
     @property
     def is_active(self) -> bool:
         return (self.fail_on_severity is not None
                 or self.fail_on_kev
                 or self.fail_on_supply_chain is not None
-                or self.fail_on_hygiene is not None)
+                or self.fail_on_hygiene is not None
+                or self.fail_on_capability_drift
+                or self.max_added_capability_buckets is not None)
 
 
 def evaluate(
@@ -83,6 +87,23 @@ def evaluate(
         elif vuln_type.startswith("sca:supply_chain:"):
             if sc_floor is not None and rank >= sc_floor:
                 fails.append(f"[supply-chain {sev}] {desc}")
+            # Drift-specific gates layer on top of (and may fire
+            # independently of) the supply-chain severity floor —
+            # operators may want to gate on drift without gating on
+            # other supply-chain signals.
+            if vuln_type == "sca:supply_chain:image_capability_drift":
+                if cfg.fail_on_capability_drift:
+                    fails.append(f"[capability-drift] {desc}")
+                if cfg.max_added_capability_buckets is not None:
+                    added = (
+                        row.get("evidence", {}).get("added_buckets") or []
+                    )
+                    if len(added) > cfg.max_added_capability_buckets:
+                        fails.append(
+                            f"[capability-drift +{len(added)} buckets > "
+                            f"max {cfg.max_added_capability_buckets}] "
+                            f"{desc}"
+                        )
         elif vuln_type.startswith("sca:hygiene:"):
             if hyg_floor is not None and rank >= hyg_floor:
                 fails.append(f"[hygiene {sev}] {desc}")
@@ -118,6 +139,24 @@ def add_threshold_args(parser) -> None:
         help="evaluate findings the operator marked suppressed in "
              ".raptor-sca-suppress.yml (default: skip them)",
     )
+    parser.add_argument(
+        "--fail-on-capability-drift", action="store_true",
+        help=(
+            "exit 1 if any image_capability_drift finding is present, "
+            "regardless of severity. Use when you want to gate on "
+            "binary-shape change without coupling to the supply-chain "
+            "severity ladder."
+        ),
+    )
+    parser.add_argument(
+        "--max-added-capability-buckets",
+        type=int, default=None, metavar="N",
+        help=(
+            "exit 1 if any image_capability_drift finding has MORE "
+            "than N added capability buckets. Use 0 to fail on any "
+            "new bucket; higher values tolerate small-scope drift."
+        ),
+    )
 
 
 def cfg_from_args(args) -> ThresholdConfig:
@@ -128,6 +167,12 @@ def cfg_from_args(args) -> ThresholdConfig:
         fail_on_supply_chain=getattr(args, "fail_on_supply_chain", None),
         fail_on_hygiene=getattr(args, "fail_on_hygiene", None),
         include_suppressed=getattr(args, "include_suppressed", False),
+        fail_on_capability_drift=getattr(
+            args, "fail_on_capability_drift", False,
+        ),
+        max_added_capability_buckets=getattr(
+            args, "max_added_capability_buckets", None,
+        ),
     )
 
 

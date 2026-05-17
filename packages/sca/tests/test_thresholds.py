@@ -203,3 +203,123 @@ def test_render_no_thresholds_set_always_passes(
     rc = render.main([str(p), "--out-md", str(tmp_path / "r.md"),
                       "--no-sarif"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# image_capability_drift threshold knobs
+# ---------------------------------------------------------------------------
+
+def _drift_finding(
+    *, severity="medium", added_buckets=None, desc="drift",
+) -> dict:
+    return {
+        "vuln_type": "sca:supply_chain:image_capability_drift",
+        "severity": severity,
+        "description": desc,
+        "evidence": {"added_buckets": added_buckets or []},
+    }
+
+
+def test_fail_on_capability_drift_fires_regardless_of_severity() -> None:
+    """The dedicated drift flag ignores the supply-chain severity
+    ladder — a single low-severity drift finding fails the build."""
+    cfg = thresholds.ThresholdConfig(fail_on_capability_drift=True)
+    rows = [_drift_finding(severity="low", added_buckets=["alloc"])]
+    passed, fails = thresholds.evaluate(rows, cfg)
+    assert passed is False
+    assert "[capability-drift]" in fails[0]
+
+
+def test_fail_on_capability_drift_no_drift_passes() -> None:
+    cfg = thresholds.ThresholdConfig(fail_on_capability_drift=True)
+    # Non-drift findings present, no drift finding → passes
+    rows = [_vuln("critical"), _supply("critical")]
+    passed, fails = thresholds.evaluate(rows, cfg)
+    assert passed is True
+    assert fails == []
+
+
+def test_max_added_capability_buckets_fires_when_exceeded() -> None:
+    """N=2 → 3 added buckets is over → fail."""
+    cfg = thresholds.ThresholdConfig(max_added_capability_buckets=2)
+    rows = [_drift_finding(
+        added_buckets=["alloc", "exec", "network"]),
+    ]
+    passed, fails = thresholds.evaluate(rows, cfg)
+    assert passed is False
+    assert "+3 buckets > max 2" in fails[0]
+
+
+def test_max_added_capability_buckets_passes_at_threshold() -> None:
+    """Strictly-greater semantics — N=2, 2 added buckets is at limit."""
+    cfg = thresholds.ThresholdConfig(max_added_capability_buckets=2)
+    rows = [_drift_finding(added_buckets=["alloc", "exec"])]
+    passed, fails = thresholds.evaluate(rows, cfg)
+    assert passed is True
+
+
+def test_max_added_capability_buckets_zero_means_any_drift_fails() -> None:
+    """N=0 → any added bucket fails."""
+    cfg = thresholds.ThresholdConfig(max_added_capability_buckets=0)
+    rows = [_drift_finding(added_buckets=["alloc"])]
+    passed, fails = thresholds.evaluate(rows, cfg)
+    assert passed is False
+
+
+def test_max_added_capability_buckets_zero_passes_when_no_added() -> None:
+    """Drift finding with no added buckets (only removals or arch
+    changes) → N=0 still passes."""
+    cfg = thresholds.ThresholdConfig(max_added_capability_buckets=0)
+    rows = [_drift_finding(added_buckets=[])]
+    passed, fails = thresholds.evaluate(rows, cfg)
+    assert passed is True
+
+
+def test_drift_flag_independent_of_supply_chain_floor() -> None:
+    """When both --fail-on-supply-chain critical AND
+    --fail-on-capability-drift are set, a medium drift finding
+    fails via the drift flag (supply-chain floor would not catch
+    it on its own)."""
+    cfg = thresholds.ThresholdConfig(
+        fail_on_supply_chain="critical",
+        fail_on_capability_drift=True,
+    )
+    rows = [_drift_finding(severity="medium", added_buckets=["exec"])]
+    passed, fails = thresholds.evaluate(rows, cfg)
+    assert passed is False
+    assert any("capability-drift" in f for f in fails)
+
+
+def test_drift_flag_active_in_is_active() -> None:
+    """Smoke: setting only the drift flag activates the config."""
+    cfg = thresholds.ThresholdConfig(fail_on_capability_drift=True)
+    assert cfg.is_active is True
+    cfg2 = thresholds.ThresholdConfig(max_added_capability_buckets=0)
+    assert cfg2.is_active is True
+
+
+def test_drift_threshold_args_round_trip(tmp_path: Path) -> None:
+    """add_threshold_args + cfg_from_args round-trips the new flags."""
+    import argparse
+    p = argparse.ArgumentParser()
+    thresholds.add_threshold_args(p)
+    args = p.parse_args([
+        "--fail-on-capability-drift",
+        "--max-added-capability-buckets", "3",
+    ])
+    cfg = thresholds.cfg_from_args(args)
+    assert cfg.fail_on_capability_drift is True
+    assert cfg.max_added_capability_buckets == 3
+
+
+def test_drift_evidence_missing_added_buckets_field_treated_as_empty() -> None:
+    """Malformed drift finding (no evidence.added_buckets) shouldn't
+    crash — treat as zero added buckets."""
+    cfg = thresholds.ThresholdConfig(max_added_capability_buckets=0)
+    rows = [{
+        "vuln_type": "sca:supply_chain:image_capability_drift",
+        "severity": "medium",
+        "description": "no evidence field at all",
+    }]
+    passed, fails = thresholds.evaluate(rows, cfg)
+    assert passed is True
