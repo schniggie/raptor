@@ -11,10 +11,8 @@ silently break the harness between the (rare) live runs.
 from __future__ import annotations
 
 import json
-import textwrap
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 

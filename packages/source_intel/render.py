@@ -290,11 +290,11 @@ def derive_evidence_strings(
     lsm_hooks = list(result.lsm_hooks)
     if finding_function:
         lsm_hooks = [
-            l for l in lsm_hooks
-            if l.enclosing_function in (finding_function, None)
+            hook for hook in lsm_hooks
+            if hook.enclosing_function in (finding_function, None)
         ]
-    for l in lsm_hooks:
-        lines.append(_render_lsm_line(l, style))
+    for hook in lsm_hooks:
+        lines.append(_render_lsm_line(hook, style))
 
     # Axis-4 multi-hop privilege back-walk evidence (Phase D follow-
     # up). Surfaces the back-walk's prose findings — the verdict-side
@@ -723,12 +723,12 @@ def _render_privilege_back_walk_line(
     )
 
 
-def _render_lsm_line(l: LsmEvidence, style: str) -> str:
+def _render_lsm_line(hook: LsmEvidence, style: str) -> str:
     """Render one axis-4 LSM hook observation."""
     fn_text = (
-        f"function `{l.enclosing_function}`"
-        if l.enclosing_function
-        else f"in {l.location[0]} near line {l.location[1]}"
+        f"function `{hook.enclosing_function}`"
+        if hook.enclosing_function
+        else f"in {hook.location[0]} near line {hook.location[1]}"
     )
     if style == "stage_d":
         prefix = "Privilege gating — LSM hook near sink"
@@ -737,8 +737,8 @@ def _render_lsm_line(l: LsmEvidence, style: str) -> str:
     else:
         prefix = "Variant hint — LSM hook"
     return (
-        f"{prefix}: `{l.hook_name}` at "
-        f"{l.location[0]}:{l.location[1]} {fn_text}. Linux Security "
+        f"{prefix}: `{hook.hook_name}` at "
+        f"{hook.location[0]}:{hook.location[1]} {fn_text}. Linux Security "
         f"Module checks the operation; deployments with active LSM "
         f"(SELinux/AppArmor/Smack) may block exploitation even when "
         f"the C-level bug exists."

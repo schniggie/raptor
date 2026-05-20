@@ -24,15 +24,13 @@ import logging
 import os
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from core.build.build_flags import BuildFlagsContext, extract_flags
 from packages.source_intel.aliases import (
     ALL_WUR_ALIASES,
-    wur_alias_in,
-    wur_alias_origin,
 )
 
 logger = logging.getLogger(__name__)
