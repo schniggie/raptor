@@ -37,6 +37,11 @@ from cve_diff.diffing import shape_dynamic
 from cve_diff.diffing.extract_via_gitlab_api import _gitlab_host_and_slug
 
 _TIMEOUT_S = 10
+
+# Git SHA shape: 7-40 lowercase hex chars. Mirrors the canonical
+# _SHA_RE in extract_via_gitlab_api; defined locally to avoid the
+# already-deep import chain.
+_SHA_RE = re.compile(r"[0-9a-f]{7,40}")
 _USER_AGENT = "cve-diff/0.1 (+https://github.com/cve-diff)"
 _MAX_BYTES = 5_000_000  # 5MB cap on patch body
 
@@ -68,8 +73,14 @@ def _patch_url_for(ref: RepoRef) -> str | None:
     unavailable.
     """
     url = (ref.repository_url or "").strip()
-    sha = (ref.fix_commit or "").strip()
+    sha = (ref.fix_commit or "").strip().lower()
     if not url or not sha:
+        return None
+    # SHA shape validation — refuse anything containing `?`, `#`,
+    # `&`, CRLF, or other URL-control characters. Without this gate,
+    # a poisoned advisory SHA like ``abc?token=`` smuggles query
+    # parameters into the constructed forge URL.
+    if not _SHA_RE.fullmatch(sha):
         return None
 
     # GitHub

@@ -1186,7 +1186,10 @@ class UrllibClient:
                 target = target.replace(tzinfo=timezone.utc)
             delta = (target - datetime.now(timezone.utc)).total_seconds()
             return max(1, min(int(delta), 1800))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError catches absurd dates a hostile server can
+            # send (e.g. year=9999999) where parsedate_to_datetime
+            # constructs a datetime that overflows ``int(delta)``.
             return None
 
 
