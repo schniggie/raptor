@@ -169,7 +169,35 @@ class AutonomousCodeQLAnalyzer:
         self.llm = llm_client
         self.validator = exploit_validator
         self.multi_turn = multi_turn_analyzer
-        self.dataflow_validator = DataflowValidator(llm_client)
+        # Wire the CWE-dispatched evidence collector so the dataflow
+        # validator surfaces sanitizer-evidence (V2) for injection-
+        # class findings AND source_intel structural evidence for
+        # memory-corruption findings. Pre-fix /codeql constructed the
+        # validator with no collector, leaving SI users on /agentic
+        # only — the standalone /codeql command never benefited from
+        # the cocci-derived evidence that the measurement harness has
+        # been demonstrating throughout the source_intel arc.
+        try:
+            from core.dataflow.llm_bridge import make_evidence_collector
+            from packages.source_intel.llm_bridge import (
+                make_source_intel_collector,
+                make_cwe_dispatched_collector,
+            )
+            sanitizer_collector = make_evidence_collector(llm_client)
+            si_collector = make_source_intel_collector()
+            evidence_collector = make_cwe_dispatched_collector(
+                sanitizer_collector=sanitizer_collector,
+                source_intel_collector=si_collector,
+            )
+            self.dataflow_validator = DataflowValidator(
+                llm_client, evidence_collector=evidence_collector,
+            )
+        except Exception:  # noqa: BLE001
+            # Best-effort: any wiring failure (missing optional dep,
+            # cocci unavailable, packaging strip) falls back to the
+            # pre-fix collector-less validator so /codeql still
+            # functions on systems where SI infra isn't installed.
+            self.dataflow_validator = DataflowValidator(llm_client)
         self.enable_visualization = enable_visualization
         self.logger = get_logger()
         # Reachability prefilter inventory. Three states:
