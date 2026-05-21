@@ -73,7 +73,7 @@ Examples:
     ap.add_argument("--recompile-guide", action="store_true", help="Show guide for recompiling binary with AFL instrumentation and sanitizers")
     ap.add_argument("--use-showmap", action="store_true", help="Run afl-showmap after fuzzing for coverage analysis")
     ap.add_argument("--autonomous", action="store_true", help="Enable autonomous mode with intelligent decision-making and learning")
-    ap.add_argument("--memory-file", help="Path to memory file for learning persistence (default: ~/.raptor/fuzzing_memory.json)")
+    ap.add_argument("--memory-file", help="Path to memory file for learning persistence (default resolves to ${HOME}/.raptor/fuzzing_memory.json — note: under 'sudo -E' HOME expands to root, not the operator's home)")
     ap.add_argument("--goal", help="High-level goal to achieve (e.g., 'find heap overflow', 'target parser code')")
 
     # New orchestrator-driven path: capability detection, libFuzzer support,
@@ -266,9 +266,20 @@ Examples:
         logger.info("AUTONOMOUS MODE ENABLED")
         logger.info("=" * 70)
 
-        # Initialize fuzzing memory for learning
+        # Initialize fuzzing memory for learning. Log the resolved
+        # path so the operator can spot a wrong ~ expansion
+        # (e.g. under ``sudo -E``, HOME resolves to /root, not the
+        # operator's home, and the default
+        # ``~/.raptor/fuzzing_memory.json`` ends up in the wrong
+        # tree without warning).
         memory_file = Path(args.memory_file) if args.memory_file else None
         memory = FuzzingMemory(memory_file)
+        try:
+            resolved_memory_path = memory_file.expanduser().resolve() if memory_file else None
+        except (OSError, RuntimeError):
+            resolved_memory_path = memory_file
+        if resolved_memory_path is not None:
+            logger.info(f"Fuzzing memory path: {resolved_memory_path}")
 
         # Initialize autonomous planner
         planner = FuzzingPlanner(memory=memory)

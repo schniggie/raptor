@@ -286,12 +286,26 @@ Examples:
     parser.add_argument("--languages", help="Comma-separated languages")
     parser.add_argument("--build-command", help="Custom build command")
     parser.add_argument("--out", help="Output directory")
-    parser.add_argument("--force", action="store_true", help="Force database recreation")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Delete and recreate the CodeQL database from scratch. Slow — "
+             "5-30min on real repos. Default is to reuse a cached database "
+             "keyed by repo + source SHA. Pass this only when the cache is "
+             "known stale (e.g. local edits the content hash didn't pick up); "
+             "do NOT pass it habitually as it throws away every cached build.",
+    )
     parser.add_argument("--extended", action="store_true", help="Use extended security suites")
     parser.add_argument("--min-files", type=int, default=3, help="Min files to detect language")
     parser.add_argument("--codeql-cli", help="Path to CodeQL CLI")
     parser.add_argument("--scan-only", action="store_true", help="Scan only (skip autonomous analysis)")
-    parser.add_argument("--max-findings", type=int, default=20, help="Max findings to analyze")
+    # ``--max-findings`` default 20 is intentionally HIGHER than
+    # ``raptor_agentic.py``'s default 10: codeql-only mode does one
+    # pass per finding (filter + summarise), while agentic does the
+    # full multi-pass LLM analysis chain — which costs ~3-5x more
+    # per finding. Keep the two defaults aligned with their cost
+    # envelopes; operators who want the same ceiling pass
+    # ``--max-findings 20`` to agentic explicitly.
+    parser.add_argument("--max-findings", type=int, default=20, help="Max findings to analyze (default: 20; agentic default is 10 due to higher per-finding LLM cost)")
     parser.add_argument("--no-visualizations", action="store_true", help="Disable dataflow visualizations")
     parser.add_argument("--trust-repo", action="store_true",
                         help="Trust the target repo's config and skip safety checks "

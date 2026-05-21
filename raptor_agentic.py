@@ -674,7 +674,7 @@ Examples:
     parser.add_argument("--repo", default=os.environ.get("RAPTOR_CALLER_DIR"),
                         help="Path to repository to analyse (default: directory raptor was launched from)")
     parser.add_argument("--policy-groups", default="all", help="Comma-separated policy groups (default: all)")
-    parser.add_argument("--max-findings", type=int, default=10, help="Maximum findings to process (default: 10)")
+    parser.add_argument("--max-findings", type=int, default=10, help="Maximum findings to process (default: 10; codeql-only default is 20, agentic is lower because each finding runs the full multi-pass LLM analysis chain at ~3-5x the per-finding cost)")
     parser.add_argument(
         "--phase-timeout", type=int,
         default=RaptorConfig.DEFAULT_TIMEOUT, metavar="SECONDS",
