@@ -522,11 +522,23 @@ class EgressProxy:
         # asyncio-loop-startup latency on a busy host (sub-second in
         # practice).
         if not self._ready.wait(timeout=_PROXY_CONNECT_TIMEOUT_S):
+            # Defensive: stop the thread so we don't leak a zombie
+            # background loop trying forever to bind. Pre-fix the
+            # raise just abandoned ``self._thread`` (daemon, so it
+            # died with the process — but every retry stacked another
+            # daemon thread on top, multiplying the bind churn).
+            self._stop_thread_best_effort()
             raise RuntimeError(
                 "egress proxy did not become ready within 30s "
                 "(thread may have crashed before signalling)"
             )
         if self._start_error is not None:
+            # Same cleanup: if the thread came up far enough to set
+            # ``_start_error`` but not ``_ready``, stop it before
+            # propagating so a future retry from the same process
+            # doesn't see an orphan thread holding the listening
+            # socket.
+            self._stop_thread_best_effort()
             raise RuntimeError(
                 f"egress proxy failed to start: {self._start_error}"
             ) from self._start_error
@@ -889,6 +901,21 @@ class EgressProxy:
             self._loop.call_soon_threadsafe(self._loop.stop)
         except RuntimeError:
             pass  # loop already stopped
+
+    def _stop_thread_best_effort(self) -> None:
+        """Defensive cleanup helper called from ``__init__`` when the
+        proxy thread fails to come up (readiness timeout or
+        ``_start_error`` populated). Tries to stop the asyncio loop
+        if one was assigned, then joins the thread briefly. Never
+        raises — caller will re-raise its own startup error.
+        """
+        if self._loop is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
     def is_alive(self) -> bool:
         """True if the proxy's event-loop thread is still running.

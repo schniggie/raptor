@@ -321,6 +321,15 @@ class LogStreamer:
             return False
 
         try:
+            # Pass through ``get_safe_env()`` so the warm-up child
+            # doesn't inherit shell-evaluated env vars (``TERMINAL`` /
+            # ``EDITOR`` / ``VISUAL`` / ``BROWSER`` / ``PAGER``) from
+            # an untrusted parent. ``sandbox-exec /usr/bin/true`` is
+            # benign on its own but ``get_safe_env()`` is the
+            # codebase-wide posture for subprocess spawn under
+            # untrusted-repo context — symmetry trumps the small
+            # marginal risk here.
+            from core.config import RaptorConfig
             warm_up = subprocess.Popen(
                 [
                     sandbox_exec, "-p", _WARM_UP_SBPL,
@@ -333,6 +342,7 @@ class LogStreamer:
                 # Operator Ctrl-C shouldn't kill our own warm-up
                 # probe; the probe finishes on its own.
                 start_new_session=True,
+                env=RaptorConfig.get_safe_env(),
             )
         except OSError:
             # WARNING (F070 W21 promote): the warm-up gate failing to
