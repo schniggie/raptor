@@ -528,9 +528,13 @@ class EgressProxy:
             # died with the process — but every retry stacked another
             # daemon thread on top, multiplying the bind churn).
             self._stop_thread_best_effort()
+            # Use the actual timeout constant in the message so an
+            # operator bumping ``_PROXY_CONNECT_TIMEOUT_S`` sees a
+            # consistent error rather than the hardcoded "30s" lie.
             raise RuntimeError(
-                "egress proxy did not become ready within 30s "
-                "(thread may have crashed before signalling)"
+                f"egress proxy did not become ready within "
+                f"{_PROXY_CONNECT_TIMEOUT_S:.0f}s "
+                f"(thread may have crashed before signalling)"
             )
         if self._start_error is not None:
             # Same cleanup: if the thread came up far enough to set

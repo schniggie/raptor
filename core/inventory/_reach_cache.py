@@ -233,10 +233,24 @@ def load_index(fingerprint: Optional[str]) -> Optional["_AdjacencyIndex"]:
                 path, st.st_mode & 0o777,
             )
             return None
+        # Short-circuit size check via ``st.st_size`` BEFORE any
+        # read. Pre-fix we walked the read loop up to 64 MiB before
+        # bailing on the running ``total > _MAX_INDEX_BYTES`` check
+        # — fine for the legitimate case (cache files weigh single
+        # MiB) but wasteful on a planted pathological file.
+        if st.st_size > _MAX_INDEX_BYTES:
+            logger.warning(
+                "reach_cache: cache entry %s size %d exceeds %d bytes "
+                "— refusing to load",
+                path, st.st_size, _MAX_INDEX_BYTES,
+            )
+            return None
         try:
             # Read via os.read in a loop until EOF — read_bytes can't
-            # take an fd directly. _MAX_INDEX_BYTES caps memory growth
-            # under attacker-controlled cache files.
+            # take an fd directly. The pre-flight size check above
+            # bounds total memory; the in-loop check stays as
+            # defence-in-depth against TOCTOU file-growth between
+            # fstat and the reads.
             chunks: list[bytes] = []
             total = 0
             while True:

@@ -491,11 +491,43 @@ class LLMClient:
                 lock = threading.Lock()
                 self._key_locks[cache_key] = lock
                 # LRU evict the oldest entry if we've exceeded the
-                # cap. ``popitem(last=False)`` drops the LRU side;
-                # the lock object itself goes out of scope and is GC'd
-                # once the last caller releases it.
-                while len(self._key_locks) > self._key_locks_cap:
-                    self._key_locks.popitem(last=False)
+                # cap, BUT only when the candidate lock is currently
+                # uncontended — try-acquiring it tells us whether
+                # any thread is mid-cache-fill on that key. Pre-fix
+                # we blindly popped the LRU entry; under pathological
+                # working-set concurrency (>cap distinct in-flight
+                # keys) we could evict a lock that another thread
+                # was still holding. The next caller for the same
+                # ``cache_key`` would then build a FRESH lock, two
+                # threads run the provider call concurrently for the
+                # same key, and the second writes a half-baked cache
+                # entry over the first.
+                #
+                # ``acquire(blocking=False)`` probes without waiting:
+                # success means no one's holding the lock so we can
+                # safely drop it (lock goes out of scope after the
+                # release, GC'd when the last reference clears);
+                # failure means we leave the entry in place and
+                # walk further back. If the whole dict is contended
+                # (every entry held), we exit the loop and let the
+                # cap silently exceed — better than dropping an
+                # active lock. Bounded scan: walk at most
+                # ``self._key_locks_cap`` candidates so an entirely
+                # contended dict doesn't burn O(N) CPU per insert.
+                evict_budget = self._key_locks_cap
+                while len(self._key_locks) > self._key_locks_cap and evict_budget > 0:
+                    candidate_key, candidate_lock = next(
+                        iter(self._key_locks.items()),
+                    )
+                    if candidate_lock.acquire(blocking=False):
+                        # No-one holds it — release and drop.
+                        candidate_lock.release()
+                        self._key_locks.pop(candidate_key, None)
+                    else:
+                        # In-flight; move to end and try the next
+                        # LRU candidate.
+                        self._key_locks.move_to_end(candidate_key)
+                    evict_budget -= 1
             else:
                 # Touch existing entries so the LRU eviction picks the
                 # genuinely cold keys, not a still-active one.

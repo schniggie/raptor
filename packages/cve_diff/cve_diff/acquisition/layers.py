@@ -117,14 +117,25 @@ def _clean_dest(dest: Path) -> None:
         # invocation defending against PATH hijack on the ``rm``
         # binary; that defence is moot once we delegate to the
         # standard library. shutil.rmtree() is also cheaper (no fork
-        # / exec), portable (works on Windows where ``rm`` isn't
-        # available), and yields structured Python exceptions on
-        # error rather than a non-zero exit-code we'd have to
-        # interpret.
+        # / exec) and portable.
         #
         # On read-only files inside ``dest`` shutil.rmtree raises
-        # ``PermissionError``. We pass ``onerror=`` that chmods +
-        # retries — same end-state as ``rm -rf``.
+        # ``PermissionError``. ``onerror=`` chmods + retries — same
+        # end-state as ``rm -rf``. Any residual failure is swallowed
+        # by the callback's inner ``except OSError: pass``, so the
+        # rmtree call as a whole stays best-effort and never raises
+        # to the caller — matching the original subprocess(
+        # check=False, capture_output=True) contract that several
+        # callers rely on (e.g. error-path cleanup where the dest
+        # may be in an indeterminate state and raising would mask
+        # the original failure).
+        #
+        # Outer-level guard: a defensive try/except OSError around
+        # the call itself catches the unlikely shape where
+        # ``shutil.rmtree`` raises before reaching the per-entry
+        # walk (e.g. scandir on ``dest`` itself fails after the
+        # lstat guards above pass — racy concurrent-rename
+        # scenario). Best-effort intent preserved end to end.
         import shutil
         import stat as _stat_mod
 
@@ -135,7 +146,14 @@ def _clean_dest(dest: Path) -> None:
             except OSError:
                 pass
 
-        shutil.rmtree(dest, onerror=_force_remove)
+        try:
+            shutil.rmtree(dest, onerror=_force_remove)
+        except OSError:
+            # ``onerror`` should have caught per-entry failures; we
+            # only reach here on rmtree's own front-of-walk error
+            # (rare). Swallow to preserve the legacy fire-and-forget
+            # contract of the subprocess-based predecessor.
+            pass
 
 
 @dataclass

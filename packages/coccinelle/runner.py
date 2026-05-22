@@ -465,11 +465,18 @@ def _inject_harness(rule_text: str, rule_name: str) -> str:
     # name that shadows a builtin (``int``, ``open``, ``__import__``)
     # or our own scratch vars and confuse the embedded interpreter.
     # Reject anything in the Python builtin/keyword namespace or
-    # starting with a dunder; rule names that fail this check skip
-    # harness injection (spatch still runs, just without
-    # COCCIRESULT structured output).
-    if (pos_var.startswith("_") or pos_var.startswith("__")
-            or pos_var in _COCCI_POS_VAR_DENY):
+    # starting with a DUNDER (``__``); rule names that fail this
+    # check skip harness injection (spatch still runs, just
+    # without COCCIRESULT structured output).
+    #
+    # Pre-fix this rejected ALL underscore-prefixed names
+    # (``startswith("_")`` was the first clause), which clobbered
+    # legitimate C-style single-underscore positions like
+    # ``position _pos``. Single-underscore now flows through —
+    # only the Python-dunder pattern + the explicit
+    # ``_COCCI_POS_VAR_DENY`` blocklist (``_p`` / ``_m`` etc.)
+    # block injection.
+    if pos_var.startswith("__") or pos_var in _COCCI_POS_VAR_DENY:
         return rule_text
 
     # Detect multi-rule .cocci files. Pre-fix the harness only

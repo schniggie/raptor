@@ -107,7 +107,15 @@ def _validate_realm(registry: str, realm: str) -> None:
             401, f"{registry} realm has no host: {realm!r}",
         )
     host = parts.hostname.lower()
-    allowed = _REALM_HOST_ALLOWLIST.get(registry, frozenset())
+    # Case-fold ``registry`` for the allowlist lookup too. Pre-fix
+    # a future caller path that passed ``"Docker.io"`` (mixed-case
+    # reference output) would miss the ``"docker.io"`` allowlist
+    # key, the ``.get(..., frozenset())`` would return empty, and
+    # the realm host comparison would fall through to a false
+    # refusal. ``parse_image_ref`` is the canonical source today
+    # and lowercases internally, but the defensive case-fold here
+    # closes that surface for any future caller path.
+    allowed = _REALM_HOST_ALLOWLIST.get(registry.lower(), frozenset())
     if host == registry.lower() or host in allowed:
         return
     raise RegistryError(

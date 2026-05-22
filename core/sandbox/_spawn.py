@@ -545,6 +545,17 @@ def run_sandboxed(
             # sandboxed child's actual tempfile location on those
             # systems, so legitimate ``tempfile.mkstemp()`` writes
             # were over-reported as would-be-blocked.
+            #
+            # Threat model: ``$TMPDIR`` is read from the auditor's
+            # environment, which the codebase treats as trusted
+            # (``RaptorConfig.get_safe_env()`` strips the
+            # shell-eval vars, and TMPDIR is honored by every
+            # libc/stdlib path anyway). If a future attacker chain
+            # leaks a tainted ``TMPDIR`` into the auditor we have
+            # a wider problem than the audit allowlist. Document
+            # the explicit dependency so a future refactor can
+            # decide to pin via ``RaptorConfig`` if the threat
+            # model tightens.
             import tempfile as _tempfile
             _writable.append(_tempfile.gettempdir())
             if output:

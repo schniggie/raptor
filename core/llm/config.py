@@ -204,7 +204,22 @@ def _get_best_thinking_model() -> Optional['ModelConfig']:
                         # path.
                         if entry_provider == "ollama":
                             from core.config import RaptorConfig
-                            api_base = f"{RaptorConfig.OLLAMA_HOST.rstrip('/')}/v1"
+                            # Reuse the same scheme/url validator
+                            # the cold-start path uses
+                            # (``_build_ollama_config``). Pre-fix
+                            # the user-config branch took
+                            # ``OLLAMA_HOST`` raw — an operator who
+                            # forgot the scheme (``example.com:11434``
+                            # instead of ``http://example.com:11434``)
+                            # got a broken ``api_base`` here even
+                            # though the cold-start path would have
+                            # surfaced the same misconfig as a
+                            # ValueError. Run through the validator
+                            # so both paths fail the same way.
+                            ollama_base = _validate_ollama_url(
+                                RaptorConfig.OLLAMA_HOST,
+                            )
+                            api_base = f"{ollama_base.rstrip('/')}/v1"
                         else:
                             api_base = PROVIDER_ENDPOINTS.get(entry_provider)
 
@@ -507,10 +522,12 @@ def _model_config_from_entry(entry: Dict) -> 'ModelConfig':
     # ``_get_configured_models`` for the same fix in the cold-start
     # path); ``PROVIDER_ENDPOINTS["ollama"]`` is a localhost default
     # that's wrong for any operator running Ollama on a separate
-    # machine.
+    # machine. Validator surface mirrors ``_build_ollama_config`` so
+    # an OLLAMA_HOST without a scheme fails the same way here.
     if provider == "ollama":
         from core.config import RaptorConfig
-        api_base = f"{RaptorConfig.OLLAMA_HOST.rstrip('/')}/v1"
+        ollama_base = _validate_ollama_url(RaptorConfig.OLLAMA_HOST)
+        api_base = f"{ollama_base.rstrip('/')}/v1"
     else:
         api_base = PROVIDER_ENDPOINTS.get(provider)
     return ModelConfig(
